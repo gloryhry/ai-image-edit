@@ -1,23 +1,25 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ios-gray: #F2F2F7;
+  --color-ios-gray: rgba(255, 255, 255, 0.4);
   --color-cool-gray: #F9F9FB;
   --color-deep-black: #1C1C1E;
 
-  --shadow-soft-spread: 0 24px 48px -12px rgba(0, 0, 0, 0.08);
+  --shadow-soft-spread: 0 24px 48px -12px rgba(0, 0, 0, 0.1), inset 0 1px 1px 0 rgba(255, 255, 255, 0.4);
   --shadow-inner-cut: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
 
   --backdrop-blur-glass-40: 40px;
   --backdrop-blur-glass-60: 60px;
 
-  --radius-ios-lg: 40px;
-  --radius-ios-md: 28px;
+  --radius-ios-lg: 24px;
+  --radius-ios-md: 24px;
   --radius-ios-sm: 12px;
 }
 
 @layer base {
   body {
-    @apply bg-ios-gray text-slate-900 font-sans antialiased;
+    @apply text-slate-900 font-sans antialiased;
+    background: radial-gradient(circle at 50% 0%, #e0f2fe 0%, #f3f4f6 50%, #eef2ff 100%);
+    min-height: 100vh;
   }
 }

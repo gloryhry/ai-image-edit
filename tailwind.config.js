@@ -20,8 +20,8 @@ export default {
                 'glass-60': '60px',
             },
             borderRadius: {
-                'ios-lg': '40px',
-                'ios-md': '28px',
+                'ios-lg': '24px',
+                'ios-md': '24px',
                 'ios-sm': '12px',
             },
             fontFamily: {

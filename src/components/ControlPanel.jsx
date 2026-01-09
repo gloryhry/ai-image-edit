@@ -2,6 +2,7 @@ import React from 'react';
 import { Button } from './ui/Button';
 import { Settings, Sparkles, Image as ImageIcon, Type, Plus, X } from 'lucide-react';
 import { cn } from '../lib/utils';
+import galaxyIcon from '../assets/galaxy.png';
 
 export function ControlPanel({
     prompt,
@@ -136,7 +137,10 @@ export function ControlPanel({
     return (
         <div className="flex flex-col h-full gap-6 p-4">
             <div className="flex items-center justify-between">
-                <h2 className="text-xl font-bold tracking-tight text-slate-900">控制面板</h2>
+                <div className="flex items-center gap-2">
+                    <img src={galaxyIcon} className="w-8 h-8 animate-pulse" alt="Galaxy" />
+                    <h2 className="text-xl font-bold tracking-tight text-slate-900">控制面板</h2>
+                </div>
                 <Button variant="ghost" size="icon" onClick={() => setShowSettings(!showSettings)}>
                     <Settings size={20} />
                 </Button>
