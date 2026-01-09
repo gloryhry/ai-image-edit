@@ -22,6 +22,8 @@ export function ControlPanel({
     setGeminiModelName,
     geminiImageSize,
     setGeminiImageSize,
+    geminiBaseUrl,
+    setGeminiBaseUrl,
     mode,
     setMode,
     imageSize,
@@ -55,12 +57,10 @@ export function ControlPanel({
         if (!trimmedName) return;
 
         const defaultModels = [
-            'nano-banana-2-2k',
-            'nano-banana-2',
-            'nano-banana-2-4k',
-            'nano-banana',
-            'gemini-3-pro-image-preview',
-            'gemini-2.5-flash-image'
+            'jimeng-4.5',
+            'jimeng-4.1',
+            'jimeng-4.0',
+            'nanobanana',
         ];
 
         if (defaultModels.includes(trimmedName) || customModels.includes(trimmedName)) {
@@ -77,25 +77,23 @@ export function ControlPanel({
         setCustomModels(prev => prev.filter(model => model !== modelToRemove));
         // 如果删除的是当前选中的模型，切换到默认模型
         if (modelName === modelToRemove) {
-            setModelName('nano-banana-2-2k');
+            setModelName('jimeng-4.5');
         }
     };
 
     // 获取所有模型选项
     const getAllModels = () => {
         const defaultModels = [
-            'nano-banana-2-2k',
-            'nano-banana-2',
-            'nano-banana-2-4k',
-            'nano-banana',
-            'gemini-3-pro-image-preview',
-            'gemini-2.5-flash-image'
+            'jimeng-4.5',
+            'jimeng-4.1',
+            'jimeng-4.0',
+            'nanobanana',
         ];
         return [...defaultModels, ...customModels];
     };
 
     const geminiModelOptions = [
-        { value: 'gemini-2.5-flash-image', label: 'Nano Banana（gemini-2.5-flash-image）' },
+        // { value: 'gemini-2.5-flash-image', label: 'Nano Banana（gemini-2.5-flash-image）' },
         { value: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro（gemini-3-pro-image-preview）' },
     ];
 
@@ -168,6 +166,16 @@ export function ControlPanel({
                                     onChange={(e) => setGeminiApiKey?.(e.target.value)}
                                     className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
                                     placeholder="AIza..."
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">接口地址</label>
+                                <input
+                                    type="text"
+                                    value={geminiBaseUrl}
+                                    onChange={(e) => setGeminiBaseUrl?.(e.target.value)}
+                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                                    placeholder="https://image.glmbigmodel.me"
                                 />
                             </div>
                             <div className="space-y-2">
@@ -304,6 +312,24 @@ export function ControlPanel({
                         >
                             <option value="1K">1K</option>
                             <option value="2K">2K</option>
+                            <option value="4K">4K</option>
+                        </select>
+                    ) : modelName === 'nanobanana' ? (
+                        <select
+                            value="1k"
+                            disabled
+                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 cursor-not-allowed opacity-70"
+                        >
+                            <option value="1k">1K</option>
+                        </select>
+                    ) : modelName.startsWith('jimeng') ? (
+                        <select
+                            value={imageSize === '4K' ? '2k' : imageSize}
+                            onChange={(e) => setImageSize(e.target.value)}
+                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                        >
+                            <option value="1k">1K</option>
+                            <option value="2k">2K</option>
                         </select>
                     ) : (
                         <select
@@ -313,24 +339,47 @@ export function ControlPanel({
                         >
                             <option value="1k">1K</option>
                             <option value="2k">2K</option>
+                            <option value="4K">4K</option>
                         </select>
                     )}
                 </div>
 
                 <div className="space-y-2">
                     <label className="text-xs font-bold uppercase tracking-widest text-slate-500">宽高比</label>
-                    <select
-                        value={aspectRatio}
-                        onChange={(e) => setAspectRatio(e.target.value)}
-                        className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                    >
-                        <option value="1:1">1:1（方形）</option>
-                        <option value="16:9">16:9（横向）</option>
-                        <option value="9:16">9:16（竖向）</option>
-                        <option value="4:3">4:3</option>
-                        <option value="3:4">3:4</option>
-                        <option value="21:9">21:9</option>
-                    </select>
+                    {apiProvider !== 'gemini_official' && modelName === 'nanobanana' ? (
+                        <select
+                            value="1:1"
+                            disabled
+                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 cursor-not-allowed opacity-70"
+                        >
+                            <option value="1:1">1:1（方形）</option>
+                        </select>
+                    ) : apiProvider === 'gemini_official' ? (
+                        <select
+                            value={aspectRatio}
+                            onChange={(e) => setAspectRatio(e.target.value)}
+                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                        >
+                            <option value="1:1">1:1（方形）</option>
+                            <option value="16:9">16:9（横向）</option>
+                            <option value="9:16">9:16（竖向）</option>
+                            <option value="4:3">4:3</option>
+                            <option value="3:4">3:4</option>
+                        </select>
+                    ) : (
+                        <select
+                            value={aspectRatio}
+                            onChange={(e) => setAspectRatio(e.target.value)}
+                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                        >
+                            <option value="1:1">1:1（方形）</option>
+                            <option value="16:9">16:9（横向）</option>
+                            <option value="9:16">9:16（竖向）</option>
+                            <option value="4:3">4:3</option>
+                            <option value="3:4">3:4</option>
+                            <option value="21:9">21:9</option>
+                        </select>
+                    )}
                 </div>
 
                 <div className="space-y-2">

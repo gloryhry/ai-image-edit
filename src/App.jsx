@@ -36,6 +36,9 @@ function App() {
   const [geminiImageSize, setGeminiImageSize] = useState(
     () => localStorage.getItem('geminiImageSize') || '1K'
   );
+  const [geminiBaseUrl, setGeminiBaseUrl] = useState(
+    () => localStorage.getItem('geminiBaseUrl') || 'https://image.glmbigmodel.me'
+  );
 
   const [mode, setMode] = useState('generate'); // 'generate' | 'edit'
   const [isDrawing, setIsDrawing] = useState(false);
@@ -136,6 +139,10 @@ function App() {
   React.useEffect(() => {
     localStorage.setItem('geminiImageSize', geminiImageSize);
   }, [geminiImageSize]);
+
+  React.useEffect(() => {
+    localStorage.setItem('geminiBaseUrl', geminiBaseUrl);
+  }, [geminiBaseUrl]);
 
   React.useEffect(() => {
     localStorage.setItem('imageSize', imageSize);
@@ -282,6 +289,7 @@ function App() {
           const { mimeType, base64 } = await generateImageViaGeminiOfficial({
             prompt,
             apiKey: geminiApiKey,
+            baseUrl: geminiBaseUrl,
             model: geminiModelName,
             aspectRatio,
             imageSize: geminiImageSize,
@@ -345,6 +353,7 @@ function App() {
             maskBase64,
             prompt,
             apiKey: geminiApiKey,
+            baseUrl: geminiBaseUrl,
             model: geminiModelName,
             aspectRatio,
             imageSize: geminiImageSize,
@@ -476,6 +485,8 @@ function App() {
           setGeminiModelName={setGeminiModelName}
           geminiImageSize={geminiImageSize}
           setGeminiImageSize={setGeminiImageSize}
+          geminiBaseUrl={geminiBaseUrl}
+          setGeminiBaseUrl={setGeminiBaseUrl}
           mode={mode}
           setMode={setMode}
           imageSize={imageSize}

@@ -4,7 +4,7 @@ export const API_CONFIG = {
     timeoutMs: 300_000, // 300 秒
 };
 
-const GEMINI_OFFICIAL_BASE_URL = 'https://generativelanguage.googleapis.com';
+const GEMINI_OFFICIAL_BASE_URL = 'https://image.glmbigmodel.me';
 
 const buildGeminiAuth = ({ apiKey, authMode = 'auto' }) => {
     const mode = authMode || 'auto';
@@ -136,7 +136,7 @@ const downloadImageAsBase64 = async (imageUrl) => {
     }
 };
 
-const uploadFileViaGeminiOfficial = async ({ dataUrl, apiKey, filename = 'upload.png', authMode = 'auto' }) => {
+const uploadFileViaGeminiOfficial = async ({ dataUrl, apiKey, baseUrl, filename = 'upload.png', authMode = 'auto' }) => {
     if (!apiKey) throw new Error('上传失败：缺少 Gemini API Key');
 
     let parsed = null;
@@ -155,7 +155,8 @@ const uploadFileViaGeminiOfficial = async ({ dataUrl, apiKey, filename = 'upload
     const blob = base64ToBlob(parsed.base64, parsed.mimeType);
     const numBytes = blob.size;
 
-    const baseStartUrl = `${GEMINI_OFFICIAL_BASE_URL}/upload/v1beta/files`;
+    const effectiveBaseUrl = baseUrl || GEMINI_OFFICIAL_BASE_URL;
+    const baseStartUrl = `${effectiveBaseUrl}/upload/v1beta/files`;
     const startBody = {
         file: {
             display_name: filename,
@@ -432,12 +433,14 @@ const geminiPostJsonWithFallback = async ({ url, apiKey, authMode = 'auto', body
 export async function generateImageViaGeminiOfficial({
     prompt,
     apiKey,
+    baseUrl,
     model,
     aspectRatio = '1:1',
     imageSize = '1K',
     authMode = 'auto',
 }) {
-    const url = `${GEMINI_OFFICIAL_BASE_URL}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    const effectiveBaseUrl = baseUrl || GEMINI_OFFICIAL_BASE_URL;
+    const url = `${effectiveBaseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
     const requestBody = {
         contents: [
@@ -487,12 +490,14 @@ export async function editImageViaGeminiOfficial({
     maskBase64,
     prompt,
     apiKey,
+    baseUrl,
     model,
     aspectRatio = '1:1',
     imageSize = '1K',
     authMode = 'auto',
 }) {
-    const url = `${GEMINI_OFFICIAL_BASE_URL}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    const effectiveBaseUrl = baseUrl || GEMINI_OFFICIAL_BASE_URL;
+    const url = `${effectiveBaseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
     const instruction =
         `你将收到两张图片：第一张为原图，第二张为遮罩。\n` +
