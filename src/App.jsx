@@ -42,10 +42,37 @@ function App() {
   const [drawMode, setDrawMode] = useState('brush'); // 'brush' | 'rectangle' | 'eraser' | 'select'
   const [brushSize, setBrushSize] = useState(30);
 
-  const [imageSize, setImageSize] = useState(() => localStorage.getItem('imageSize') || '1024x1024');
+  const [imageSize, setImageSize] = useState(() => localStorage.getItem('imageSize') || '2k');
   const [aspectRatio, setAspectRatio] = useState(() => localStorage.getItem('aspectRatio') || '1:1');
 
   const canvasRef = useRef(null);
+
+  // 定义支持的宽高比选项及其数值
+  const aspectRatioOptions = [
+    { value: '1:1', ratio: 1 },
+    { value: '16:9', ratio: 16 / 9 },
+    { value: '9:16', ratio: 9 / 16 },
+    { value: '4:3', ratio: 4 / 3 },
+    { value: '3:4', ratio: 3 / 4 },
+    { value: '21:9', ratio: 21 / 9 },
+  ];
+
+  // 根据图片宽高检测最接近的宽高比选项
+  const detectAspectRatio = (width, height) => {
+    const imageRatio = width / height;
+    let closestOption = aspectRatioOptions[0];
+    let minDiff = Math.abs(imageRatio - closestOption.ratio);
+
+    for (const option of aspectRatioOptions) {
+      const diff = Math.abs(imageRatio - option.ratio);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestOption = option;
+      }
+    }
+
+    return closestOption.value;
+  };
   const [regions, setRegions] = useState([]);
   const [regionInstructions, setRegionInstructions] = useState({});
 
@@ -144,6 +171,14 @@ function App() {
       setMode('edit');
       setDrawMode('brush');
       setIsDrawing(true);
+
+      // 检测图片宽高比并自动选择最接近的选项
+      const img = new window.Image();
+      img.onload = () => {
+        const detectedRatio = detectAspectRatio(img.width, img.height);
+        setAspectRatio(detectedRatio);
+      };
+      img.src = String(dataUrl);
     } catch (err) {
       console.error('上传失败', err);
     }
@@ -348,6 +383,8 @@ function App() {
             baseUrl,
             model: modelName,
             imageMimeType,
+            ratio: aspectRatio,
+            resolution: imageSize,
           });
         }
 

@@ -553,28 +553,42 @@ export async function editImageViaGeminiOfficial({
 /**
  * Call the Gemini Image Generation API (OpenAI-compatible via third-party)
  */
-export async function generateImage({ prompt, aspectRatio = '1:1', apiKey, baseUrl, model, size = '1024x1024' }) {
+export async function generateImage({ prompt, aspectRatio = '1:1', apiKey, baseUrl, model, size = '2k' }) {
     const url = `${baseUrl || API_CONFIG.baseUrl}/v1/images/generations`;
+    const IMAGE_TIMEOUT_MS = 200_000; // 200 秒超时
 
-    const response = await fetchWithTimeout(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey || API_CONFIG.apiKey}`
-        },
-        body: JSON.stringify({
-            prompt,
-            model: model || "gemini-2.5-flash-image",
-            n: 1,
-            size: size,
-            aspect_ratio: aspectRatio,
-            response_format: "b64_json"
-        })
-    });
+    let response;
+    try {
+        response = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey || API_CONFIG.apiKey}`
+            },
+            body: JSON.stringify({
+                prompt,
+                model: model || "gemini-2.5-flash-image",
+                n: 1,
+                ratio: aspectRatio,
+                resolution: size,
+                response_format: "b64_json"
+            })
+        }, IMAGE_TIMEOUT_MS);
+    } catch (err) {
+        if (err?.message?.includes('请求超时')) {
+            throw new Error('服务器负载较大，请重试');
+        }
+        throw err;
+    }
 
     if (!response.ok) {
         const err = await response.json();
-        throw new Error(err.error?.message || '生成失败');
+        const errMsg = err.error?.message || '';
+        // 429 + 特定错误码 30：提示修改提示词
+        if (response.status === 429 && errMsg.includes('API_IMAGE_GENERATION_FAILED') && errMsg.includes('30')) {
+            throw new Error('请修改提示词后重试');
+        }
+        throw new Error(errMsg || '生成失败');
     }
 
     return await response.json();
@@ -681,13 +695,16 @@ export async function editImageViaChatCompletions({ imageDataUrl, maskDataUrl, p
  * According to API docs: /v1/images/edits with multipart/form-data
  * Sends image and mask as separate file uploads
  */
-export async function editImage({ imageBase64, maskBase64, prompt, apiKey, baseUrl, model, imageMimeType = 'image/png' }) {
+export async function editImage({ imageBase64, maskBase64, prompt, apiKey, baseUrl, model, imageMimeType = 'image/png', ratio = '1:1', resolution = '2k' }) {
     const url = `${baseUrl || API_CONFIG.baseUrl}/v1/images/edits`;
+    const IMAGE_TIMEOUT_MS = 200_000; // 200 秒超时
 
     // Create FormData
     const formData = new FormData();
     formData.append('model', model || 'nano-banana');
     formData.append('prompt', prompt);
+    formData.append('ratio', ratio);
+    formData.append('resolution', resolution);
 
     // Append image files
     const imageBlob = base64ToBlob(imageBase64, imageMimeType);
@@ -698,18 +715,31 @@ export async function editImage({ imageBase64, maskBase64, prompt, apiKey, baseU
 
     formData.append('response_format', 'b64_json');
 
-    const response = await fetchWithTimeout(url, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${apiKey || API_CONFIG.apiKey}`
-            // Don't set Content-Type - browser will set it with boundary
-        },
-        body: formData
-    });
+    let response;
+    try {
+        response = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey || API_CONFIG.apiKey}`
+                // Don't set Content-Type - browser will set it with boundary
+            },
+            body: formData
+        }, IMAGE_TIMEOUT_MS);
+    } catch (err) {
+        if (err?.message?.includes('请求超时')) {
+            throw new Error('服务器负载较大，请重试');
+        }
+        throw err;
+    }
 
     if (!response.ok) {
         const err = await response.json();
-        throw new Error(err.error?.message || '编辑失败');
+        const errMsg = err.error?.message || '';
+        // 429 + 特定错误码 30：提示修改提示词
+        if (response.status === 429 && errMsg.includes('API_IMAGE_GENERATION_FAILED') && errMsg.includes('30')) {
+            throw new Error('请修改提示词后重试');
+        }
+        throw new Error(errMsg || '编辑失败');
     }
 
     const data = await response.json();
