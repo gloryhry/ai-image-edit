@@ -93,10 +93,19 @@ export function ControlPanel({
         return [...defaultModels, ...customModels];
     };
 
-    const geminiModelOptions = [
+    const geminiModelOptions = React.useMemo(() => [
         // { value: 'gemini-2.5-flash-image', label: 'Nano Banana（gemini-2.5-flash-image）' },
         { value: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro（gemini-3-pro-image-preview）' },
-    ];
+    ], []);
+
+    React.useEffect(() => {
+        if (apiProvider === 'gemini_official' && geminiModelOptions.length > 0) {
+            const isValid = geminiModelOptions.some(opt => opt.value === geminiModelName);
+            if (!isValid && setGeminiModelName) {
+                setGeminiModelName(geminiModelOptions[0].value);
+            }
+        }
+    }, [apiProvider, geminiModelName, geminiModelOptions, setGeminiModelName]);
 
     const copyToClipboard = async (text) => {
         if (!text) return false;
@@ -155,8 +164,8 @@ export function ControlPanel({
                             onChange={(e) => setApiProvider?.(e.target.value)}
                             className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
                         >
-                            <option value="openai_compat">第三方中转（OpenAI 兼容）</option>
-                            <option value="gemini_official">Gemini 官方</option>
+                            <option value="openai_compat">即梦（OpenAI 兼容模型）</option>
+                            <option value="gemini_official">Gemini 官方模型</option>
                         </select>
                     </div>
 

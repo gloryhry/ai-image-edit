@@ -31,7 +31,7 @@ function App() {
   );
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
   const [geminiModelName, setGeminiModelName] = useState(
-    () => localStorage.getItem('geminiModelName') || 'gemini-2.5-flash-image'
+    () => localStorage.getItem('geminiModelName') || 'gemini-3-pro-image-preview'
   );
   const [geminiImageSize, setGeminiImageSize] = useState(
     () => localStorage.getItem('geminiImageSize') || '1K'
