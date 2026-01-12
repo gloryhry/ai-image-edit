@@ -35,6 +35,8 @@
 
 🎨 **智能生图** - 文字生成图片
 🎨 **图片局部编辑** - 画笔涂抹或框选局部区域，输入编辑指令进行局部修改，可以一次性框选多处同时修改
+👤 **用户管理系统** - 完整的用户注册登录、余额管理、兑换码系统
+🔐 **管理后台** - 模型管理、用户管理、兑换码管理、使用日志、系统配置
 
 ### 🚀 开始你的项目
 
@@ -47,11 +49,33 @@
 # 1. 初始化新项目安装依赖项
 npm install
 
-# 2. 运行项目
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env 文件，填入你的 Supabase 配置
+# VITE_SUPABASE_URL=your-supabase-url
+# VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+
+# 3. 运行项目
 npm run dev
 
 # 访问方式地址
 http://localhost:5173
+```
+
+### 🔧 Supabase 配置
+
+1. 在 [Supabase](https://supabase.com) 创建项目
+2. 在 SQL Editor 中执行 `supabase/migrations/001_initial_schema.sql` 文件中的 SQL
+3. 配置 Authentication:
+   - 启用 Email 登录
+   - 启用 GitHub OAuth（在 Authentication > Providers > GitHub）
+4. 复制项目 URL 和 anon key 到 `.env` 文件
+
+### 👤 设置管理员
+
+在 Supabase SQL Editor 中执行:
+```sql
+UPDATE public.profiles SET is_admin = TRUE WHERE email = 'your-admin@email.com';
 ```
 
 #### docker-compose（推荐）
