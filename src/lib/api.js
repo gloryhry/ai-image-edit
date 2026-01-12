@@ -1,5 +1,5 @@
 export const API_CONFIG = {
-    baseUrl: 'https://foxi-ai.top', // Default, can be overridden
+    baseUrl: 'https://image.glmbigmodel.me', // Default, can be overridden
     apiKey: '', // User must provide
     timeoutMs: 300_000, // 300 秒
 };

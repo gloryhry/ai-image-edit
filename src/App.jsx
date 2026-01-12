@@ -23,8 +23,8 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false);
 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('apiKey') || '');
-  const [baseUrl, setBaseUrl] = useState(() => localStorage.getItem('baseUrl') || 'https://foxi-ai.top');
-  const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'nano-banana-2-2k');
+  const [baseUrl, setBaseUrl] = useState(() => localStorage.getItem('baseUrl') || 'https://image.glmbigmodel.me');
+  const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'jimeng-4.5');
 
   const [apiProvider, setApiProvider] = useState(
     () => localStorage.getItem('apiProvider') || 'openai_compat'
