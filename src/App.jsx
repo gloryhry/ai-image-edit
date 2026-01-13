@@ -4,18 +4,9 @@ import { CanvasEditor } from './components/CanvasEditor';
 import { ControlPanel } from './components/ControlPanel';
 import { Layout } from './components/Layout';
 import { Button } from './components/ui/Button';
-import {
-  editImage,
-  editImageViaChatCompletions,
-  editImageViaGeminiOfficial,
-  generateImage,
-  generateImageViaChatCompletions,
-  generateImageViaGeminiOfficial,
-  uploadFile,
-} from './lib/api';
+import { generateImage, editImage } from './lib/api-proxy';
 import { supabase } from './lib/supabase';
 import { useAuth } from './contexts/AuthContext';
-import { handleBilling } from './lib/billing';
 
 function App() {
   const { user, profile, refreshProfile } = useAuth();
@@ -23,36 +14,16 @@ function App() {
   const [imageUrl, setImageUrl] = useState(null);
   const [imageBase64, setImageBase64] = useState(null);
   const [imageMimeType, setImageMimeType] = useState('image/png');
-  const [imageRemoteUrl, setImageRemoteUrl] = useState(null);
   const [prompt, setPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-
-  // API 配置从 Supabase 获取
-  const [apiKey, setApiKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
-  const [geminiApiKey, setGeminiApiKey] = useState('');
-  const [geminiBaseUrl, setGeminiBaseUrl] = useState('');
 
   // 模型列表从 Supabase 获取
   const [models, setModels] = useState([]);
   const [selectedModelId, setSelectedModelId] = useState(() => localStorage.getItem('selectedModelId') || '');
 
-  // 从 Supabase 加载系统设置和模型列表
+  // 从 Supabase 加载模型列表
   useEffect(() => {
     const fetchData = async () => {
-      // 加载系统设置
-      const { data: settingsData, error: settingsError } = await supabase.from('system_settings').select('*');
-      if (!settingsError && settingsData) {
-        const settingsMap = {};
-        settingsData.forEach((s) => {
-          settingsMap[s.key] = s.value;
-        });
-        if (settingsMap.openai_api_key) setApiKey(settingsMap.openai_api_key);
-        if (settingsMap.openai_base_url) setBaseUrl(settingsMap.openai_base_url);
-        if (settingsMap.gemini_api_key) setGeminiApiKey(settingsMap.gemini_api_key);
-        if (settingsMap.gemini_base_url) setGeminiBaseUrl(settingsMap.gemini_base_url);
-      }
-
       // 加载模型列表
       const { data: modelsData, error: modelsError } = await supabase
         .from('models')
@@ -61,7 +32,6 @@ function App() {
         .order('created_at', { ascending: true });
       if (!modelsError && modelsData) {
         setModels(modelsData);
-        // 如果没有选中的模型或选中的模型不存在，选择第一个
         const savedId = localStorage.getItem('selectedModelId');
         const modelExists = modelsData.some(m => m.id === savedId);
         if (!modelExists && modelsData.length > 0) {
@@ -74,8 +44,6 @@ function App() {
 
   // 获取当前选中的模型信息
   const selectedModel = models.find(m => m.id === selectedModelId) || null;
-  const apiProvider = selectedModel?.provider || 'openai_compat';
-  const modelName = selectedModel?.name || '';
 
   const [mode, setMode] = useState('generate'); // 'generate' | 'edit'
   const [isDrawing, setIsDrawing] = useState(false);
@@ -120,33 +88,12 @@ function App() {
     setImageUrl(null);
     setImageBase64(null);
     setImageMimeType('image/png');
-    setImageRemoteUrl(null);
     setMode('generate');
     setIsDrawing(false);
     setDrawMode('brush');
     setRegions([]);
     setRegionInstructions({});
     canvasRef.current = null;
-  };
-
-  const isChatImageModel = (name) =>
-    name === 'gemini-3-pro-image-preview' || name === 'gemini-2.5-flash-image';
-
-  const ensureCurrentImageRemoteUrl = async () => {
-    if (imageRemoteUrl) return imageRemoteUrl;
-    if (!imageBase64) return null;
-
-    const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
-    const uploaded = await uploadFile({
-      dataUrl,
-      apiKey,
-      baseUrl,
-      apiProvider,
-      geminiApiKey,
-      filename: 'image.png',
-    });
-    setImageRemoteUrl(uploaded.url);
-    return uploaded.url;
   };
 
   React.useEffect(() => {
@@ -169,7 +116,7 @@ function App() {
     try {
       // 允许重复选择同一个文件也能触发 onChange
       input.value = '';
-      // 避免异步加载竞态导致“新图不替换”
+      // 避免异步加载竞态导致"新图不替换"
       resetCurrentImage();
 
       const dataUrl = await new Promise((resolve, reject) => {
@@ -183,7 +130,6 @@ function App() {
       setImageMimeType(mime);
       setImageBase64(base64);
       setImageUrl(String(dataUrl));
-      setImageRemoteUrl(null);
       setMode('edit');
       setDrawMode('brush');
       setIsDrawing(true);
@@ -248,16 +194,13 @@ function App() {
       const originalVpt = canvas.viewportTransform;
       try {
         canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
-        const maskDataUrl = canvas.toDataURL({
+        const maskData = canvas.toDataURL({
           format: 'png',
-          left: 0,
-          top: 0,
           width: bgImage.width,
           height: bgImage.height,
           multiplier: 1,
-          enableRetinaScaling: false,
         });
-        return maskDataUrl.split(',')[1];
+        return maskData.split(',')[1];
       } finally {
         canvas.setViewportTransform(originalVpt);
       }
@@ -267,200 +210,89 @@ function App() {
       originalStyles.forEach(({ obj, fill, stroke, strokeWidth, opacity }) => {
         obj.set({ fill, stroke, strokeWidth, opacity });
       });
-      canvas.requestRenderAll();
+      canvas.renderAll();
     }
   };
 
   const clearMaskObjects = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.getObjects().slice().forEach(obj => canvas.remove(obj));
-    canvas.requestRenderAll();
+    const objects = canvas.getObjects();
+    objects.forEach((obj) => canvas.remove(obj));
+    canvas.renderAll();
+    setRegions([]);
+    setRegionInstructions({});
   };
 
   const handleGenerate = async () => {
-    if (!selectedModel) {
-      alert('请先选择一个模型');
-      return;
-    }
-
     if (!user) {
       alert('请先登录');
       return;
     }
 
-    if (apiProvider === 'gemini_official') {
-      if (!geminiApiKey) {
-        alert('请先在后台设置 Gemini API Key');
-        return;
-      }
-    } else {
-      if (!apiKey) {
-        alert('请先在后台设置 API Key');
-        return;
-      }
+    if (!selectedModel) {
+      alert('请选择模型');
+      return;
     }
 
-    const actionType = mode === 'generate' ? 'generate' : 'edit';
-    const pricePerCall = selectedModel?.price_per_call || 0;
+    if (!prompt?.trim()) {
+      alert('请输入提示词');
+      return;
+    }
 
-    const requestParams = {
-      prompt,
-      model: modelName,
-      aspectRatio,
-      imageSize,
-    };
+    const pricePerCall = selectedModel.price_per_call || 0;
+    if (pricePerCall > 0 && (!profile?.balance || profile.balance < pricePerCall)) {
+      alert('余额不足，请先充值');
+      return;
+    }
 
     setIsGenerating(true);
-    let isSuccess = false;
-    let errorMessage = null;
 
     try {
       if (mode === 'generate') {
-        if (apiProvider === 'gemini_official') {
-          const { mimeType, base64 } = await generateImageViaGeminiOfficial({
-            prompt,
-            apiKey: geminiApiKey,
-            baseUrl: geminiBaseUrl,
-            model: modelName,
-            aspectRatio,
-            imageSize,
-          });
-          setImageMimeType(mimeType || 'image/png');
-          setImageBase64(base64);
-          setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
-          setImageRemoteUrl(null);
-          setMode('edit');
-          setDrawMode('brush');
-          setIsDrawing(true);
-          isSuccess = true;
-        } else if (isChatImageModel(modelName)) {
-          const { mimeType, base64 } = await generateImageViaChatCompletions({
-            prompt,
-            apiKey,
-            baseUrl,
-            model: modelName,
-          });
-          setImageMimeType(mimeType || 'image/png');
-          setImageBase64(base64);
-          setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
-          setImageRemoteUrl(null);
-          setMode('edit');
-          setDrawMode('brush');
-          setIsDrawing(true);
-          isSuccess = true;
-        } else {
-          const result = await generateImage({
-            prompt,
-            apiKey,
-            baseUrl,
-            model: modelName,
-            size: imageSize,
-            aspectRatio: aspectRatio,
-          });
+        const { mimeType, base64 } = await generateImage({
+          prompt,
+          modelId: selectedModelId,
+          aspectRatio,
+          size: imageSize,
+        });
 
-          let b64 = result.data?.[0]?.b64_json;
-          if (b64) {
-            if (b64.startsWith('data:image')) b64 = b64.split(',')[1];
-            setImageMimeType('image/png');
-            setImageBase64(b64);
-            setImageUrl(`data:image/png;base64,${b64}`);
-            setImageRemoteUrl(null);
-            setMode('edit');
-            setDrawMode('brush');
-            setIsDrawing(true);
-            isSuccess = true;
-          }
-        }
+        setImageMimeType(mimeType || 'image/png');
+        setImageBase64(base64);
+        setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
+        setMode('edit');
+        setDrawMode('brush');
+        setIsDrawing(true);
       } else {
         if (!imageBase64) {
-          console.error('缺少图片数据');
+          alert('缺少图片数据');
           return;
         }
 
         const maskBase64 = buildMaskBase64();
 
-        let resultImage = null;
-        if (apiProvider === 'gemini_official') {
-          const { mimeType, base64 } = await editImageViaGeminiOfficial({
-            imageBase64,
-            imageMimeType,
-            maskBase64,
-            prompt,
-            apiKey: geminiApiKey,
-            baseUrl: geminiBaseUrl,
-            model: modelName,
-            aspectRatio,
-            imageSize,
-          });
-          setImageMimeType(mimeType || 'image/png');
-          setImageBase64(base64);
-          setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
-          setImageRemoteUrl(null);
-          clearMaskObjects();
-          isSuccess = true;
-        } else if (isChatImageModel(modelName)) {
-          const imageUrlForModel = await ensureCurrentImageRemoteUrl();
-          if (!imageUrlForModel) throw new Error('缺少图片数据');
-          const maskDataUrl = `data:image/png;base64,${maskBase64}`;
-          const { mimeType, base64 } = await editImageViaChatCompletions({
-            imageDataUrl: imageUrlForModel,
-            maskDataUrl,
-            prompt,
-            apiKey,
-            baseUrl,
-            model: modelName,
-          });
-          setImageMimeType(mimeType || 'image/png');
-          setImageBase64(base64);
-          setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
-          setImageRemoteUrl(null);
-          clearMaskObjects();
-          isSuccess = true;
-        } else {
-          resultImage = await editImage({
-            imageBase64,
-            maskBase64,
-            prompt,
-            apiKey,
-            baseUrl,
-            model: modelName,
-            imageMimeType,
-            ratio: aspectRatio,
-            resolution: imageSize,
-          });
-        }
+        const { mimeType, base64 } = await editImage({
+          imageBase64,
+          imageMimeType,
+          maskBase64,
+          prompt,
+          modelId: selectedModelId,
+          aspectRatio,
+          size: imageSize,
+        });
 
-        if (resultImage) {
-          let b64 = resultImage;
-          if (b64.startsWith('data:image')) b64 = b64.split(',')[1];
-          setImageMimeType('image/png');
-          setImageBase64(b64);
-          setImageUrl(`data:image/png;base64,${b64}`);
-          setImageRemoteUrl(null);
-          clearMaskObjects();
-          isSuccess = true;
-        }
+        setImageMimeType(mimeType || 'image/png');
+        setImageBase64(base64);
+        setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
+        clearMaskObjects();
       }
+
+      // 刷新用户信息以更新余额
+      refreshProfile();
     } catch (err) {
       console.error(err);
-      errorMessage = err.message;
       alert(`出错：${err.message}`);
     } finally {
-      await handleBilling({
-        userId: user.id,
-        modelName,
-        actionType,
-        pricePerCall,
-        isSuccess,
-        errorMessage,
-        requestParams,
-      });
-
-      if (isSuccess) {
-        refreshProfile();
-      }
-
       setIsGenerating(false);
     }
   };

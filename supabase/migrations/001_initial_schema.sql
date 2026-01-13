@@ -192,8 +192,12 @@ CREATE POLICY "logs_insert" ON public.usage_logs
     FOR INSERT WITH CHECK (TRUE);
 
 -- System Settings 策略
+-- 只允许读取非敏感配置，API key 只能通过 service-role 访问
 CREATE POLICY "settings_select" ON public.system_settings
-    FOR SELECT USING (TRUE);
+    FOR SELECT USING (
+        key IN ('redemption_purchase_link', 'new_user_bonus')
+        OR public.is_admin()
+    );
 
 CREATE POLICY "settings_update" ON public.system_settings
     FOR UPDATE USING (public.is_admin());
