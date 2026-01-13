@@ -389,12 +389,17 @@ app.post('/api/ai-image', async (req, res) => {
 
       // Deduct balance if successful
       if (isSuccess && model.price_per_call > 0) {
-        await supabaseService.rpc('deduct_balance', {
+        const { data: deductResult, error: deductError } = await supabaseService.rpc('deduct_balance', {
           p_user_id: user.id,
           p_amount: model.price_per_call,
           p_model_name: model.name,
           p_action_type: actionType,
         });
+        if (deductError) {
+          console.error('Deduct balance error:', deductError);
+        } else if (deductResult && !deductResult.success) {
+          console.error('Deduct balance failed:', deductResult.message);
+        }
       }
     }
 

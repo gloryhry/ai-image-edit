@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     email TEXT,
     username TEXT,
     avatar_url TEXT,
-    balance DECIMAL(10, 4) DEFAULT 0.0000,
+    balance DECIMAL(10, 4) NOT NULL DEFAULT 0.0000,
     total_spent DECIMAL(10, 4) DEFAULT 0.0000,
     is_admin BOOLEAN DEFAULT FALSE,
     is_banned BOOLEAN DEFAULT FALSE,
@@ -299,6 +299,11 @@ BEGIN
     FROM public.profiles 
     WHERE id = p_user_id
     FOR UPDATE;
+    
+    -- Check if user exists and has valid balance
+    IF v_current_balance IS NULL THEN
+        RETURN jsonb_build_object('success', FALSE, 'message', '用户不存在或余额为空');
+    END IF;
     
     IF v_current_balance < p_amount THEN
         RETURN jsonb_build_object('success', FALSE, 'message', '余额不足');
