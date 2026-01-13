@@ -56,7 +56,7 @@ export const LoginPage = () => {
       <div className="w-full max-w-md">
         <div className="bg-white rounded-2xl shadow-xl p-8">
           <div className="text-center mb-8">
-            <h1 className="text-2xl font-bold text-slate-800">AI 图像编辑</h1>
+            <h1 className="text-2xl font-bold text-slate-800">银河杂货铺 · 绘图站</h1>
             <p className="text-slate-500 mt-2">
               {isLogin ? '登录您的账户' : '创建新账户'}
             </p>

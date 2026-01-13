@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Download, Image as ImageIcon, ImageOff, Upload } from 'lucide-react';
 import { CanvasEditor } from './components/CanvasEditor';
 import { ControlPanel } from './components/ControlPanel';
@@ -13,8 +13,13 @@ import {
   generateImageViaGeminiOfficial,
   uploadFile,
 } from './lib/api';
+import { supabase } from './lib/supabase';
+import { useAuth } from './contexts/AuthContext';
+import { handleBilling } from './lib/billing';
 
 function App() {
+  const { user, profile, refreshProfile } = useAuth();
+
   const [imageUrl, setImageUrl] = useState(null);
   const [imageBase64, setImageBase64] = useState(null);
   const [imageMimeType, setImageMimeType] = useState('image/png');
@@ -22,23 +27,55 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('apiKey') || '');
-  const [baseUrl, setBaseUrl] = useState(() => localStorage.getItem('baseUrl') || 'https://image.glmbigmodel.me');
-  const [modelName, setModelName] = useState(() => localStorage.getItem('modelName') || 'jimeng-4.5');
+  // API 配置从 Supabase 获取
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [geminiApiKey, setGeminiApiKey] = useState('');
+  const [geminiBaseUrl, setGeminiBaseUrl] = useState('');
 
-  const [apiProvider, setApiProvider] = useState(
-    () => localStorage.getItem('apiProvider') || 'openai_compat'
-  );
-  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
-  const [geminiModelName, setGeminiModelName] = useState(
-    () => localStorage.getItem('geminiModelName') || 'gemini-3-pro-image-preview'
-  );
-  const [geminiImageSize, setGeminiImageSize] = useState(
-    () => localStorage.getItem('geminiImageSize') || '1K'
-  );
-  const [geminiBaseUrl, setGeminiBaseUrl] = useState(
-    () => localStorage.getItem('geminiBaseUrl') || 'https://image.glmbigmodel.me'
-  );
+  // 模型列表从 Supabase 获取
+  const [models, setModels] = useState([]);
+  const [selectedModelId, setSelectedModelId] = useState(() => localStorage.getItem('selectedModelId') || '');
+
+  // 从 Supabase 加载系统设置和模型列表
+  useEffect(() => {
+    const fetchData = async () => {
+      // 加载系统设置
+      const { data: settingsData, error: settingsError } = await supabase.from('system_settings').select('*');
+      if (!settingsError && settingsData) {
+        const settingsMap = {};
+        settingsData.forEach((s) => {
+          settingsMap[s.key] = s.value;
+        });
+        if (settingsMap.openai_api_key) setApiKey(settingsMap.openai_api_key);
+        if (settingsMap.openai_base_url) setBaseUrl(settingsMap.openai_base_url);
+        if (settingsMap.gemini_api_key) setGeminiApiKey(settingsMap.gemini_api_key);
+        if (settingsMap.gemini_base_url) setGeminiBaseUrl(settingsMap.gemini_base_url);
+      }
+
+      // 加载模型列表
+      const { data: modelsData, error: modelsError } = await supabase
+        .from('models')
+        .select('*')
+        .eq('is_active', true)
+        .order('created_at', { ascending: true });
+      if (!modelsError && modelsData) {
+        setModels(modelsData);
+        // 如果没有选中的模型或选中的模型不存在，选择第一个
+        const savedId = localStorage.getItem('selectedModelId');
+        const modelExists = modelsData.some(m => m.id === savedId);
+        if (!modelExists && modelsData.length > 0) {
+          setSelectedModelId(modelsData[0].id);
+        }
+      }
+    };
+    fetchData();
+  }, []);
+
+  // 获取当前选中的模型信息
+  const selectedModel = models.find(m => m.id === selectedModelId) || null;
+  const apiProvider = selectedModel?.provider || 'openai_compat';
+  const modelName = selectedModel?.name || '';
 
   const [mode, setMode] = useState('generate'); // 'generate' | 'edit'
   const [isDrawing, setIsDrawing] = useState(false);
@@ -113,36 +150,8 @@ function App() {
   };
 
   React.useEffect(() => {
-    localStorage.setItem('apiKey', apiKey);
-  }, [apiKey]);
-
-  React.useEffect(() => {
-    localStorage.setItem('baseUrl', baseUrl);
-  }, [baseUrl]);
-
-  React.useEffect(() => {
-    localStorage.setItem('modelName', modelName);
-  }, [modelName]);
-
-  React.useEffect(() => {
-    localStorage.setItem('apiProvider', apiProvider);
-  }, [apiProvider]);
-
-  React.useEffect(() => {
-    localStorage.setItem('geminiApiKey', geminiApiKey);
-  }, [geminiApiKey]);
-
-  React.useEffect(() => {
-    localStorage.setItem('geminiModelName', geminiModelName);
-  }, [geminiModelName]);
-
-  React.useEffect(() => {
-    localStorage.setItem('geminiImageSize', geminiImageSize);
-  }, [geminiImageSize]);
-
-  React.useEffect(() => {
-    localStorage.setItem('geminiBaseUrl', geminiBaseUrl);
-  }, [geminiBaseUrl]);
+    localStorage.setItem('selectedModelId', selectedModelId);
+  }, [selectedModelId]);
 
   React.useEffect(() => {
     localStorage.setItem('imageSize', imageSize);
@@ -270,19 +279,42 @@ function App() {
   };
 
   const handleGenerate = async () => {
+    if (!selectedModel) {
+      alert('请先选择一个模型');
+      return;
+    }
+
+    if (!user) {
+      alert('请先登录');
+      return;
+    }
+
     if (apiProvider === 'gemini_official') {
       if (!geminiApiKey) {
-        alert('请先在设置中填写 Gemini API Key');
+        alert('请先在后台设置 Gemini API Key');
         return;
       }
     } else {
       if (!apiKey) {
-        alert('请先在设置中填写 API Key');
+        alert('请先在后台设置 API Key');
         return;
       }
     }
 
+    const actionType = mode === 'generate' ? 'generate' : 'edit';
+    const pricePerCall = selectedModel?.price_per_call || 0;
+
+    const requestParams = {
+      prompt,
+      model: modelName,
+      aspectRatio,
+      imageSize,
+    };
+
     setIsGenerating(true);
+    let isSuccess = false;
+    let errorMessage = null;
+
     try {
       if (mode === 'generate') {
         if (apiProvider === 'gemini_official') {
@@ -290,9 +322,9 @@ function App() {
             prompt,
             apiKey: geminiApiKey,
             baseUrl: geminiBaseUrl,
-            model: geminiModelName,
+            model: modelName,
             aspectRatio,
-            imageSize: geminiImageSize,
+            imageSize,
           });
           setImageMimeType(mimeType || 'image/png');
           setImageBase64(base64);
@@ -301,6 +333,7 @@ function App() {
           setMode('edit');
           setDrawMode('brush');
           setIsDrawing(true);
+          isSuccess = true;
         } else if (isChatImageModel(modelName)) {
           const { mimeType, base64 } = await generateImageViaChatCompletions({
             prompt,
@@ -315,6 +348,7 @@ function App() {
           setMode('edit');
           setDrawMode('brush');
           setIsDrawing(true);
+          isSuccess = true;
         } else {
           const result = await generateImage({
             prompt,
@@ -335,6 +369,7 @@ function App() {
             setMode('edit');
             setDrawMode('brush');
             setIsDrawing(true);
+            isSuccess = true;
           }
         }
       } else {
@@ -354,18 +389,17 @@ function App() {
             prompt,
             apiKey: geminiApiKey,
             baseUrl: geminiBaseUrl,
-            model: geminiModelName,
+            model: modelName,
             aspectRatio,
-            imageSize: geminiImageSize,
+            imageSize,
           });
           setImageMimeType(mimeType || 'image/png');
           setImageBase64(base64);
           setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
           setImageRemoteUrl(null);
           clearMaskObjects();
-          return;
+          isSuccess = true;
         } else if (isChatImageModel(modelName)) {
-          // 关键：先把当前图片上传成 URL，再调用大模型（chat/completions）
           const imageUrlForModel = await ensureCurrentImageRemoteUrl();
           if (!imageUrlForModel) throw new Error('缺少图片数据');
           const maskDataUrl = `data:image/png;base64,${maskBase64}`;
@@ -382,7 +416,7 @@ function App() {
           setImageUrl(`data:${mimeType || 'image/png'};base64,${base64}`);
           setImageRemoteUrl(null);
           clearMaskObjects();
-          return;
+          isSuccess = true;
         } else {
           resultImage = await editImage({
             imageBase64,
@@ -405,12 +439,28 @@ function App() {
           setImageUrl(`data:image/png;base64,${b64}`);
           setImageRemoteUrl(null);
           clearMaskObjects();
+          isSuccess = true;
         }
       }
     } catch (err) {
       console.error(err);
+      errorMessage = err.message;
       alert(`出错：${err.message}`);
     } finally {
+      await handleBilling({
+        userId: user.id,
+        modelName,
+        actionType,
+        pricePerCall,
+        isSuccess,
+        errorMessage,
+        requestParams,
+      });
+
+      if (isSuccess) {
+        refreshProfile();
+      }
+
       setIsGenerating(false);
     }
   };
@@ -471,22 +521,10 @@ function App() {
           setPrompt={setPrompt}
           onGenerate={handleGenerate}
           isGenerating={isGenerating}
-          apiProvider={apiProvider}
-          setApiProvider={setApiProvider}
-          apiKey={apiKey}
-          setApiKey={setApiKey}
-          baseUrl={baseUrl}
-          setBaseUrl={setBaseUrl}
-          modelName={modelName}
-          setModelName={setModelName}
-          geminiApiKey={geminiApiKey}
-          setGeminiApiKey={setGeminiApiKey}
-          geminiModelName={geminiModelName}
-          setGeminiModelName={setGeminiModelName}
-          geminiImageSize={geminiImageSize}
-          setGeminiImageSize={setGeminiImageSize}
-          geminiBaseUrl={geminiBaseUrl}
-          setGeminiBaseUrl={setGeminiBaseUrl}
+          models={models}
+          selectedModelId={selectedModelId}
+          setSelectedModelId={setSelectedModelId}
+          selectedModel={selectedModel}
           mode={mode}
           setMode={setMode}
           imageSize={imageSize}

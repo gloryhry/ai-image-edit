@@ -17,7 +17,7 @@ export const LogsPage = () => {
 
     let query = supabase
       .from('usage_logs')
-      .select('*')
+      .select('*, profiles:user_id(email)')
       .order('created_at', { ascending: false })
       .limit(500);
 
@@ -60,8 +60,7 @@ export const LogsPage = () => {
     const s = search.toLowerCase();
     return (
       log.model_name?.toLowerCase().includes(s) ||
-      log.user?.email?.toLowerCase().includes(s) ||
-      log.user?.username?.toLowerCase().includes(s) ||
+      log.profiles?.email?.toLowerCase().includes(s) ||
       log.ip_address?.includes(s)
     );
   });
@@ -170,7 +169,7 @@ export const LogsPage = () => {
                   {isAdmin && (
                     <td className="px-4 py-3 text-sm">
                       <div>
-                        <p className="font-medium text-slate-500">{log.user_id?.slice(0, 8) || '-'}</p>
+                        <p className="font-medium text-slate-700">{log.profiles?.email || '-'}</p>
                       </div>
                     </td>
                   )}

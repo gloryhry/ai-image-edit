@@ -1,6 +1,6 @@
 import React from 'react';
 import { Button } from './ui/Button';
-import { Settings, Sparkles, Image as ImageIcon, Type, Plus, X } from 'lucide-react';
+import { Sparkles, Image as ImageIcon } from 'lucide-react';
 import { cn } from '../lib/utils';
 import galaxyIcon from '../assets/galaxy.png';
 
@@ -9,22 +9,10 @@ export function ControlPanel({
     setPrompt,
     onGenerate,
     isGenerating,
-    apiProvider,
-    setApiProvider,
-    apiKey,
-    setApiKey,
-    baseUrl,
-    setBaseUrl,
-    modelName,
-    setModelName,
-    geminiApiKey,
-    setGeminiApiKey,
-    geminiModelName,
-    setGeminiModelName,
-    geminiImageSize,
-    setGeminiImageSize,
-    geminiBaseUrl,
-    setGeminiBaseUrl,
+    models = [],
+    selectedModelId,
+    setSelectedModelId,
+    selectedModel,
     mode,
     setMode,
     imageSize,
@@ -36,76 +24,45 @@ export function ControlPanel({
     setRegionInstruction,
     focusRegion,
 }) {
-    const [showSettings, setShowSettings] = React.useState(false);
     const [copyHint, setCopyHint] = React.useState('');
-    const [customModels, setCustomModels] = React.useState(() => {
-        try {
-            return JSON.parse(localStorage.getItem('customModels') || '[]');
-        } catch {
-            return [];
-        }
-    });
-    const [newModelName, setNewModelName] = React.useState('');
 
-    // 保存自定义模型到localStorage
+    // 根据当前模式过滤可用模型
+    const availableModels = React.useMemo(() => {
+        return models.filter(m => {
+            if (mode === 'generate') {
+                return m.api_method === 'generate' || m.api_method === 'both';
+            } else {
+                return m.api_method === 'edit' || m.api_method === 'both';
+            }
+        });
+    }, [models, mode]);
+
+    // 当模式改变时，如果当前选中的模型不支持该模式，则自动切换
     React.useEffect(() => {
-        localStorage.setItem('customModels', JSON.stringify(customModels));
-    }, [customModels]);
-
-    // 添加自定义模型
-    const addCustomModel = () => {
-        const trimmedName = newModelName.trim();
-        if (!trimmedName) return;
-
-        const defaultModels = [
-            'jimeng-4.5',
-            'jimeng-4.1',
-            'jimeng-4.0',
-            'nanobanana',
-        ];
-
-        if (defaultModels.includes(trimmedName) || customModels.includes(trimmedName)) {
-            alert('该模型已存在');
-            return;
-        }
-
-        setCustomModels(prev => [...prev, trimmedName]);
-        setNewModelName('');
-    };
-
-    // 删除自定义模型
-    const removeCustomModel = (modelToRemove) => {
-        setCustomModels(prev => prev.filter(model => model !== modelToRemove));
-        // 如果删除的是当前选中的模型，切换到默认模型
-        if (modelName === modelToRemove) {
-            setModelName('jimeng-4.5');
-        }
-    };
-
-    // 获取所有模型选项
-    const getAllModels = () => {
-        const defaultModels = [
-            'jimeng-4.5',
-            'jimeng-4.1',
-            'jimeng-4.0',
-            'nanobanana',
-        ];
-        return [...defaultModels, ...customModels];
-    };
-
-    const geminiModelOptions = React.useMemo(() => [
-        // { value: 'gemini-2.5-flash-image', label: 'Nano Banana（gemini-2.5-flash-image）' },
-        { value: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro（gemini-3-pro-image-preview）' },
-    ], []);
-
-    React.useEffect(() => {
-        if (apiProvider === 'gemini_official' && geminiModelOptions.length > 0) {
-            const isValid = geminiModelOptions.some(opt => opt.value === geminiModelName);
-            if (!isValid && setGeminiModelName) {
-                setGeminiModelName(geminiModelOptions[0].value);
+        if (availableModels.length > 0 && selectedModelId) {
+            const isCurrentModelAvailable = availableModels.some(m => m.id === selectedModelId);
+            if (!isCurrentModelAvailable) {
+                setSelectedModelId(availableModels[0].id);
             }
         }
-    }, [apiProvider, geminiModelName, geminiModelOptions, setGeminiModelName]);
+    }, [mode, availableModels, selectedModelId, setSelectedModelId]);
+
+    // 获取当前模型支持的分辨率和宽高比
+    const supportedResolutions = selectedModel?.supported_resolutions || ['1024x1024'];
+    const supportedAspectRatios = selectedModel?.supported_aspect_ratios || ['1:1'];
+
+    // 当模型改变时，如果当前选择的分辨率/宽高比不在支持列表中，则自动切换
+    React.useEffect(() => {
+        if (supportedResolutions.length > 0 && !supportedResolutions.includes(imageSize)) {
+            setImageSize(supportedResolutions[0]);
+        }
+    }, [selectedModelId, supportedResolutions, imageSize, setImageSize]);
+
+    React.useEffect(() => {
+        if (supportedAspectRatios.length > 0 && !supportedAspectRatios.includes(aspectRatio)) {
+            setAspectRatio(supportedAspectRatios[0]);
+        }
+    }, [selectedModelId, supportedAspectRatios, aspectRatio, setAspectRatio]);
 
     const copyToClipboard = async (text) => {
         if (!text) return false;
@@ -143,154 +100,58 @@ export function ControlPanel({
         return lines.join('\n');
     };
 
+    // 宽高比显示标签
+    const aspectRatioLabels = {
+        '1:1': '1:1（方形）',
+        '16:9': '16:9（横向）',
+        '9:16': '9:16（竖向）',
+        '4:3': '4:3',
+        '3:4': '3:4',
+        '21:9': '21:9',
+    };
+
     return (
         <div className="flex flex-col h-full gap-6 p-4">
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <img src={galaxyIcon} className="w-8 h-8 animate-pulse" alt="Galaxy" />
-                    <h2 className="text-xl font-bold tracking-tight text-slate-900">控制面板</h2>
+                    <h2 className="text-xl font-bold tracking-tight text-slate-900">银河杂货铺 · 绘图站</h2>
                 </div>
-                <Button variant="ghost" size="icon" onClick={() => setShowSettings(!showSettings)}>
-                    <Settings size={20} />
-                </Button>
             </div>
 
-            {showSettings && (
-                <div className="flex flex-col gap-4 p-4 bg-white/50 rounded-ios-md border border-white/60 shadow-sm animate-in fade-in slide-in-from-top-2">
-                    <div className="space-y-2">
-                        <label className="text-xs font-bold uppercase tracking-widest text-slate-500">接口类型</label>
-                        <select
-                            value={apiProvider}
-                            onChange={(e) => setApiProvider?.(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="openai_compat">即梦（OpenAI 兼容模型）</option>
-                            <option value="gemini_official">Gemini 官方模型</option>
-                        </select>
-                    </div>
-
-                    {apiProvider === 'gemini_official' ? (
-                        <>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Gemini API Key</label>
-                                <input
-                                    type="password"
-                                    value={geminiApiKey}
-                                    onChange={(e) => setGeminiApiKey?.(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                    placeholder="AIza..."
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">接口地址</label>
-                                <input
-                                    type="text"
-                                    value={geminiBaseUrl}
-                                    onChange={(e) => setGeminiBaseUrl?.(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                    placeholder="https://image.glmbigmodel.me"
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">Gemini 模型</label>
-                                <select
-                                    value={geminiModelName}
-                                    onChange={(e) => setGeminiModelName?.(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                >
-                                    {geminiModelOptions.map((opt) => (
-                                        <option key={opt.value} value={opt.value}>
-                                            {opt.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        </>
+            {/* 模型选择 - 常驻显示 */}
+            <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">选择模型</label>
+                <select
+                    value={selectedModelId}
+                    onChange={(e) => setSelectedModelId(e.target.value)}
+                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
+                >
+                    {availableModels.length === 0 ? (
+                        <option value="">暂无可用模型</option>
                     ) : (
-                        <>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">API Key</label>
-                                <input
-                                    type="password"
-                                    value={apiKey}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                    placeholder="sk-..."
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">接口地址</label>
-                                <input
-                                    type="text"
-                                    value={baseUrl}
-                                    onChange={(e) => setBaseUrl(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                    placeholder="https://..."
-                                />
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-xs font-bold uppercase tracking-widest text-slate-500">模型名称</label>
-                                <select
-                                    value={modelName}
-                                    onChange={(e) => setModelName(e.target.value)}
-                                    className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                >
-                                    {getAllModels().map(model => (
-                                        <option key={model} value={model}>{model}</option>
-                                    ))}
-                                </select>
-
-                                {/* 自定义模型管理 */}
-                                <div className="mt-3 space-y-2">
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-xs font-bold uppercase tracking-widest text-slate-500">自定义模型</span>
-                                    </div>
-
-                                    {/* 添加新模型 */}
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={newModelName}
-                                            onChange={(e) => setNewModelName(e.target.value)}
-                                            onKeyPress={(e) => e.key === 'Enter' && addCustomModel()}
-                                            className="flex-1 px-2 py-1 bg-white/80 rounded border border-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
-                                            placeholder="输入模型名称"
-                                        />
-                                        <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            onClick={addCustomModel}
-                                            className="px-2 py-1 h-auto"
-                                        >
-                                            <Plus size={14} />
-                                        </Button>
-                                    </div>
-
-                                    {/* 显示自定义模型列表 */}
-                                    {customModels.length > 0 && (
-                                        <div className="space-y-1 max-h-24 overflow-y-auto">
-                                            {customModels.map(model => (
-                                                <div key={model} className="flex items-center justify-between bg-white/50 rounded px-2 py-1">
-                                                    <span className="text-xs text-slate-700 flex-1 truncate">{model}</span>
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        onClick={() => removeCustomModel(model)}
-                                                        className="px-1 py-0 h-auto text-red-500 hover:text-red-700"
-                                                    >
-                                                        <X size={12} />
-                                                    </Button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </>
+                        availableModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                                {model.display_name || model.name}
+                            </option>
+                        ))
                     )}
-                </div>
-            )}
+                </select>
+                {selectedModel && (
+                    <div className="text-xs text-slate-500">
+                        {selectedModel.provider === 'gemini_official' ? (
+                            <span className="px-2 py-0.5 bg-purple-100 text-purple-700 rounded">Gemini</span>
+                        ) : (
+                            <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded">OpenAI 兼容</span>
+                        )}
+                        {selectedModel.description && (
+                            <span className="ml-2">{selectedModel.description}</span>
+                        )}
+                    </div>
+                )}
+            </div>
 
+            {/* 生成/编辑模式切换 */}
             <div className="space-y-4">
                 <div className="flex p-1 bg-gray-200/50 rounded-xl">
                     <button
@@ -313,88 +174,45 @@ export function ControlPanel({
                     </button>
                 </div>
 
-
-
+                {/* 图片尺寸 */}
                 <div className="space-y-2">
                     <label className="text-xs font-bold uppercase tracking-widest text-slate-500">图片尺寸</label>
-                    {apiProvider === 'gemini_official' ? (
-                        <select
-                            value={geminiImageSize}
-                            onChange={(e) => setGeminiImageSize?.(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="1K">1K</option>
-                            <option value="2K">2K</option>
-                            <option value="4K">4K</option>
-                        </select>
-                    ) : modelName === 'nanobanana' ? (
-                        <select
-                            value="1k"
-                            disabled
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 cursor-not-allowed opacity-70"
-                        >
-                            <option value="1k">1K</option>
-                        </select>
-                    ) : modelName.startsWith('jimeng') ? (
-                        <select
-                            value={imageSize === '4K' ? '2k' : imageSize}
-                            onChange={(e) => setImageSize(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="1k">1K</option>
-                            <option value="2k">2K</option>
-                        </select>
-                    ) : (
-                        <select
-                            value={imageSize}
-                            onChange={(e) => setImageSize(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="1k">1K</option>
-                            <option value="2k">2K</option>
-                            <option value="4K">4K</option>
-                        </select>
-                    )}
+                    <select
+                        value={imageSize}
+                        onChange={(e) => setImageSize(e.target.value)}
+                        disabled={supportedResolutions.length <= 1}
+                        className={cn(
+                            "w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400",
+                            supportedResolutions.length <= 1 && "cursor-not-allowed opacity-70"
+                        )}
+                    >
+                        {supportedResolutions.map((res) => (
+                            <option key={res} value={res}>{res}</option>
+                        ))}
+                    </select>
                 </div>
 
+                {/* 宽高比 */}
                 <div className="space-y-2">
                     <label className="text-xs font-bold uppercase tracking-widest text-slate-500">宽高比</label>
-                    {apiProvider !== 'gemini_official' && modelName === 'nanobanana' ? (
-                        <select
-                            value="1:1"
-                            disabled
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400 cursor-not-allowed opacity-70"
-                        >
-                            <option value="1:1">1:1（方形）</option>
-                        </select>
-                    ) : apiProvider === 'gemini_official' ? (
-                        <select
-                            value={aspectRatio}
-                            onChange={(e) => setAspectRatio(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="1:1">1:1（方形）</option>
-                            <option value="16:9">16:9（横向）</option>
-                            <option value="9:16">9:16（竖向）</option>
-                            <option value="4:3">4:3</option>
-                            <option value="3:4">3:4</option>
-                        </select>
-                    ) : (
-                        <select
-                            value={aspectRatio}
-                            onChange={(e) => setAspectRatio(e.target.value)}
-                            className="w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-                        >
-                            <option value="1:1">1:1（方形）</option>
-                            <option value="16:9">16:9（横向）</option>
-                            <option value="9:16">9:16（竖向）</option>
-                            <option value="4:3">4:3</option>
-                            <option value="3:4">3:4</option>
-                            <option value="21:9">21:9</option>
-                        </select>
-                    )}
+                    <select
+                        value={aspectRatio}
+                        onChange={(e) => setAspectRatio(e.target.value)}
+                        disabled={supportedAspectRatios.length <= 1}
+                        className={cn(
+                            "w-full px-3 py-2 bg-white/80 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400",
+                            supportedAspectRatios.length <= 1 && "cursor-not-allowed opacity-70"
+                        )}
+                    >
+                        {supportedAspectRatios.map((ratio) => (
+                            <option key={ratio} value={ratio}>
+                                {aspectRatioLabels[ratio] || ratio}
+                            </option>
+                        ))}
+                    </select>
                 </div>
 
+                {/* 提示词 */}
                 <div className="space-y-2">
                     <div className="flex items-center justify-between">
                         <label className="text-xs font-bold uppercase tracking-widest text-slate-500">
@@ -419,7 +237,7 @@ export function ControlPanel({
 
                 <Button
                     onClick={onGenerate}
-                    disabled={isGenerating || !prompt}
+                    disabled={isGenerating || !prompt || !selectedModelId}
                     className="w-full h-14 text-lg shadow-soft-spread"
                 >
                     {isGenerating ? (
@@ -443,7 +261,7 @@ export function ControlPanel({
 
                     {regions.length === 0 ? (
                         <div className="p-3 bg-white/50 rounded-ios-md border border-white/60 text-xs text-slate-600">
-                            还没有矩形框选。请选择底部“矩形框选”工具，在图片上拖拽创建多个区域。
+                            还没有矩形框选。请选择底部"矩形框选"工具，在图片上拖拽创建多个区域。
                         </div>
                     ) : (
                         <div className="space-y-2">
