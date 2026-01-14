@@ -5,6 +5,8 @@ import { withSessionRefresh } from '../../lib/supabase-request';
 import { useAuth } from '../../contexts/AuthContext';
 
 export const LogsPage = () => {
+  console.log('[LogsPage] Component rendering...');
+
   const { isAdmin, user } = useAuth();
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -14,42 +16,56 @@ export const LogsPage = () => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [models, setModels] = useState([]);
 
+  console.log('[LogsPage] Auth state:', { isAdmin, userId: user?.id, loading });
+
   const fetchLogs = async () => {
+    console.log('[LogsPage] fetchLogs called');
     setLoading(true);
     setError(null);
 
-    const { data, error: fetchError } = await withSessionRefresh(async () => {
-      let query = supabase
-        .from('usage_logs')
-        .select('*, profiles:user_id(email)')
-        .order('created_at', { ascending: false })
-        .limit(500);
+    try {
+      const { data, error: fetchError } = await withSessionRefresh(async () => {
+        console.log('[LogsPage] Building query...');
+        let query = supabase
+          .from('usage_logs')
+          .select('*, profiles:user_id(email)')
+          .order('created_at', { ascending: false })
+          .limit(500);
 
-      if (!isAdmin) {
-        query = query.eq('user_id', user.id);
+        if (!isAdmin) {
+          query = query.eq('user_id', user.id);
+        }
+
+        if (filterModel) {
+          query = query.eq('model_name', filterModel);
+        }
+
+        if (filterStatus !== 'all') {
+          query = query.eq('is_success', filterStatus === 'success');
+        }
+
+        console.log('[LogsPage] Executing query...');
+        return query;
+      });
+
+      console.log('[LogsPage] Query result:', { hasData: !!data, hasError: !!fetchError });
+
+      if (fetchError) {
+        console.error('[LogsPage] Failed to fetch logs:', fetchError);
+        setError('加载日志失败，请点击刷新重试');
+      } else {
+        setLogs(data || []);
       }
-
-      if (filterModel) {
-        query = query.eq('model_name', filterModel);
-      }
-
-      if (filterStatus !== 'all') {
-        query = query.eq('is_success', filterStatus === 'success');
-      }
-
-      return query;
-    });
-
-    if (fetchError) {
-      console.error('Failed to fetch logs:', fetchError);
-      setError('加载日志失败，请点击刷新重试');
-    } else {
-      setLogs(data || []);
+    } catch (e) {
+      console.error('[LogsPage] Exception in fetchLogs:', e);
+      setError('加载日志失败: ' + e.message);
     }
+
     setLoading(false);
   };
 
   const fetchModels = async () => {
+    console.log('[LogsPage] fetchModels called');
     const { data } = await supabase.from('models').select('name, display_name');
     if (data) {
       setModels(data);
@@ -57,10 +73,12 @@ export const LogsPage = () => {
   };
 
   useEffect(() => {
+    console.log('[LogsPage] useEffect[] triggered - fetching models');
     fetchModels();
   }, []);
 
   useEffect(() => {
+    console.log('[LogsPage] useEffect[filterModel, filterStatus, isAdmin] triggered - fetching logs');
     fetchLogs();
   }, [filterModel, filterStatus, isAdmin]);
 

@@ -1,5 +1,15 @@
 import { supabase, refreshSession, ensureValidSession } from './supabase';
 
+// 带超时的 Promise 包装器
+function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+        })
+    ]);
+}
+
 /**
  * 带自动 session 刷新的 Supabase 请求包装器
  * 当请求失败且疑似 session 过期时，自动尝试刷新 session 并重试
@@ -7,16 +17,28 @@ import { supabase, refreshSession, ensureValidSession } from './supabase';
  * @param {Function} queryFn - 返回 Supabase query 的函数
  * @param {Object} options - 配置选项
  * @param {number} options.maxRetries - 最大重试次数，默认 2
+ * @param {number} options.timeoutMs - 超时时间，默认 30 秒
  * @returns {Promise<{data: any, error: any}>}
  */
-export async function withSessionRefresh(queryFn, { maxRetries = 2 } = {}) {
-    // 首先确保 session 有效
-    await ensureValidSession();
+export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 30000 } = {}) {
+    console.log('[Supabase Request] Starting request...');
+
+    // 首先确保 session 有效（带超时）
+    try {
+        console.log('[Supabase Request] Checking session validity...');
+        await withTimeout(ensureValidSession(), 10000, 'Session 检查超时');
+        console.log('[Supabase Request] Session check completed');
+    } catch (e) {
+        console.warn('[Supabase Request] Session check failed:', e.message);
+        // 继续执行请求，不阻塞
+    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const result = await queryFn();
+            console.log(`[Supabase Request] Executing query (attempt ${attempt + 1}/${maxRetries + 1})...`);
+            const result = await withTimeout(queryFn(), timeoutMs, '查询超时');
             const { data, error } = result;
+            console.log('[Supabase Request] Query completed, error:', error ? error.message : 'none');
 
             if (!error) {
                 return { data, error: null };
@@ -24,11 +46,12 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2 } = {}) {
 
             // 检查是否是认证相关的错误
             const isAuthError = isAuthenticationError(error);
+            console.log('[Supabase Request] Is auth error:', isAuthError);
 
             if (isAuthError && attempt < maxRetries) {
                 console.warn(`[Supabase Request] Auth error detected, attempting refresh (${attempt + 1}/${maxRetries})...`);
 
-                const refreshed = await refreshSession();
+                const refreshed = await withTimeout(refreshSession(), 10000, 'Session 刷新超时');
                 if (!refreshed) {
                     // 无法刷新 session，返回原始错误
                     return { data: null, error };
@@ -45,9 +68,13 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2 } = {}) {
             console.error('[Supabase Request] Unexpected error:', e);
 
             if (attempt < maxRetries) {
-                const refreshed = await refreshSession();
-                if (refreshed) {
-                    continue;
+                try {
+                    const refreshed = await withTimeout(refreshSession(), 10000, 'Session 刷新超时');
+                    if (refreshed) {
+                        continue;
+                    }
+                } catch (refreshError) {
+                    console.warn('[Supabase Request] Refresh failed:', refreshError.message);
                 }
             }
 
@@ -55,6 +82,7 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2 } = {}) {
         }
     }
 
+    console.log('[Supabase Request] Max retries exceeded');
     // 兜底
     return { data: null, error: new Error('Max retries exceeded') };
 }
