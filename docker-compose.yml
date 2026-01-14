@@ -2,7 +2,8 @@ name: nano-banana-app
 
 services:
   web:
-    build: .
+    image: ghcr.io/gloryhry/ai-image-edit-frontend:latest
+    # build: .
     ports:
       - "8890:80"
     restart: unless-stopped
@@ -10,7 +11,8 @@ services:
       - api
 
   api:
-    build: ./server
+    image: ghcr.io/gloryhry/ai-image-edit-server:latest
+    # build: ./server
     ports:
       - "3001:3001"
     restart: unless-stopped

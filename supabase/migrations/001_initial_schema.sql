@@ -135,7 +135,8 @@ BEGIN
         WHERE id = auth.uid() AND is_admin = TRUE
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE
+SET search_path = public;
 
 -- =====================================================
 -- 8. RLS 策略 (Row Level Security)
@@ -150,13 +151,13 @@ ALTER TABLE public.wallet_transactions ENABLE ROW LEVEL SECURITY;
 
 -- Profiles 策略 (使用 is_admin() 函数避免递归)
 CREATE POLICY "profiles_select" ON public.profiles
-    FOR SELECT USING (auth.uid() = id OR public.is_admin());
+    FOR SELECT USING ((select auth.uid()) = id OR public.is_admin());
 
 CREATE POLICY "profiles_update" ON public.profiles
-    FOR UPDATE USING (auth.uid() = id OR public.is_admin());
+    FOR UPDATE USING ((select auth.uid()) = id OR public.is_admin());
 
 CREATE POLICY "profiles_insert" ON public.profiles
-    FOR INSERT WITH CHECK (auth.uid() = id);
+    FOR INSERT WITH CHECK ((select auth.uid()) = id);
 
 -- Models 策略
 CREATE POLICY "models_select" ON public.models
@@ -186,7 +187,7 @@ CREATE POLICY "codes_delete" ON public.redemption_codes
 
 -- Usage Logs 策略
 CREATE POLICY "logs_select" ON public.usage_logs
-    FOR SELECT USING (user_id = auth.uid() OR public.is_admin());
+    FOR SELECT USING (user_id = (select auth.uid()) OR public.is_admin());
 
 CREATE POLICY "logs_insert" ON public.usage_logs
     FOR INSERT WITH CHECK (TRUE);
@@ -207,7 +208,7 @@ CREATE POLICY "settings_insert" ON public.system_settings
 
 -- Wallet Transactions 策略
 CREATE POLICY "wallet_select" ON public.wallet_transactions
-    FOR SELECT USING (user_id = auth.uid() OR public.is_admin());
+    FOR SELECT USING (user_id = (select auth.uid()) OR public.is_admin());
 
 CREATE POLICY "wallet_insert" ON public.wallet_transactions
     FOR INSERT WITH CHECK (TRUE);
@@ -239,7 +240,8 @@ BEGIN
     
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public;
 
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
@@ -284,7 +286,8 @@ BEGIN
         'new_balance', v_new_balance
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public;
 
 -- =====================================================
 -- 11. 函数: 消费扣款
@@ -322,4 +325,5 @@ BEGIN
     
     RETURN jsonb_build_object('success', TRUE, 'new_balance', v_new_balance);
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public;
