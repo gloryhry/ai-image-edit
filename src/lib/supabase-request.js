@@ -1,4 +1,4 @@
-import { supabase, refreshSession, ensureValidSession } from './supabase';
+import { supabase, tryRefreshSession, recreateClient, markRequestSuccess, markClientUnhealthy } from './supabase';
 
 // 带超时的 Promise 包装器
 function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') {
@@ -11,36 +11,29 @@ function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') 
 }
 
 /**
- * 带自动 session 刷新的 Supabase 请求包装器
- * 当请求失败且疑似 session 过期时，自动尝试刷新 session 并重试
+ * 带自动恢复的 Supabase 请求包装器
+ * 直接执行请求，失败时尝试刷新 session 并重试
  * 
  * @param {Function} queryFn - 返回 Supabase query 的函数
  * @param {Object} options - 配置选项
- * @param {number} options.maxRetries - 最大重试次数，默认 2
+ * @param {number} options.maxRetries - 最大重试次数，默认 1
  * @param {number} options.timeoutMs - 超时时间，默认 30 秒
  * @returns {Promise<{data: any, error: any}>}
  */
-export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 30000 } = {}) {
+export async function withSessionRefresh(queryFn, { maxRetries = 1, timeoutMs = 30000 } = {}) {
     console.log('[Supabase Request] Starting request...');
-
-    // 首先确保 session 有效（带超时）
-    try {
-        console.log('[Supabase Request] Checking session validity...');
-        await withTimeout(ensureValidSession(), 10000, 'Session 检查超时');
-        console.log('[Supabase Request] Session check completed');
-    } catch (e) {
-        console.warn('[Supabase Request] Session check failed:', e.message);
-        // 继续执行请求，不阻塞
-    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             console.log(`[Supabase Request] Executing query (attempt ${attempt + 1}/${maxRetries + 1})...`);
             const result = await withTimeout(queryFn(), timeoutMs, '查询超时');
             const { data, error } = result;
+
             console.log('[Supabase Request] Query completed, error:', error ? error.message : 'none');
 
             if (!error) {
+                // 请求成功，标记健康状态
+                markRequestSuccess();
                 return { data, error: null };
             }
 
@@ -49,15 +42,19 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 
             console.log('[Supabase Request] Is auth error:', isAuthError);
 
             if (isAuthError && attempt < maxRetries) {
-                console.warn(`[Supabase Request] Auth error detected, attempting refresh (${attempt + 1}/${maxRetries})...`);
+                console.warn(`[Supabase Request] Auth error detected, attempting recovery...`);
+                markClientUnhealthy();
 
-                const refreshed = await withTimeout(refreshSession(), 10000, 'Session 刷新超时');
+                // 尝试刷新 session（非阻塞，带超时）
+                const refreshed = await tryRefreshSession(5000);
+
                 if (!refreshed) {
-                    // 无法刷新 session，返回原始错误
-                    return { data: null, error };
+                    // 刷新失败，尝试重建客户端
+                    console.warn('[Supabase Request] Refresh failed, recreating client...');
+                    recreateClient();
                 }
 
-                // 刷新成功，继续重试
+                // 继续重试
                 continue;
             }
 
@@ -65,16 +62,15 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 
             return { data, error };
 
         } catch (e) {
-            console.error('[Supabase Request] Unexpected error:', e);
+            console.error('[Supabase Request] Error:', e.message);
 
-            if (attempt < maxRetries) {
-                try {
-                    const refreshed = await withTimeout(refreshSession(), 10000, 'Session 刷新超时');
-                    if (refreshed) {
-                        continue;
-                    }
-                } catch (refreshError) {
-                    console.warn('[Supabase Request] Refresh failed:', refreshError.message);
+            if (e.message === '查询超时') {
+                markClientUnhealthy();
+
+                if (attempt < maxRetries) {
+                    console.warn('[Supabase Request] Query timeout, recreating client and retrying...');
+                    recreateClient();
+                    continue;
                 }
             }
 
@@ -83,7 +79,6 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 
     }
 
     console.log('[Supabase Request] Max retries exceeded');
-    // 兜底
     return { data: null, error: new Error('Max retries exceeded') };
 }
 
@@ -119,5 +114,3 @@ function isAuthenticationError(error) {
 export async function rpcWithRefresh(rpcName, params, options = {}) {
     return withSessionRefresh(() => supabase.rpc(rpcName, params), options);
 }
-
-export { ensureValidSession, refreshSession };
