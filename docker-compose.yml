@@ -7,6 +7,9 @@ services:
     ports:
       - "8890:80"
     restart: unless-stopped
+    environment:
+      - VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
+      - VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
     depends_on:
       - api
 
