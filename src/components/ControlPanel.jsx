@@ -115,7 +115,7 @@ export function ControlPanel({
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <img src={galaxyIcon} className="w-8 h-8 animate-pulse" alt="Galaxy" />
-                    <h2 className="text-xl font-bold tracking-tight text-slate-900">银河杂货铺 · 绘图站</h2>
+                    <h2 className="text-xl font-bold tracking-tight text-slate-900">银河画肆 · 银河杂货铺</h2>
                 </div>
             </div>
 

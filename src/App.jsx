@@ -29,7 +29,7 @@ function App() {
         .from('models')
         .select('*')
         .eq('is_active', true)
-        .order('created_at', { ascending: true });
+        .order('display_name', { ascending: true });
       if (!modelsError && modelsData) {
         setModels(modelsData);
         const savedId = localStorage.getItem('selectedModelId');
