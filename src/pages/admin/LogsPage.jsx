@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { Search, Filter, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Search, Filter, Loader2, CheckCircle, XCircle, RefreshCw, AlertCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { withSessionRefresh } from '../../lib/supabase-request';
 import { useAuth } from '../../contexts/AuthContext';
 
 export const LogsPage = () => {
   const { isAdmin, user } = useAuth();
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
   const [filterModel, setFilterModel] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -14,27 +16,34 @@ export const LogsPage = () => {
 
   const fetchLogs = async () => {
     setLoading(true);
+    setError(null);
 
-    let query = supabase
-      .from('usage_logs')
-      .select('*, profiles:user_id(email)')
-      .order('created_at', { ascending: false })
-      .limit(500);
+    const { data, error: fetchError } = await withSessionRefresh(async () => {
+      let query = supabase
+        .from('usage_logs')
+        .select('*, profiles:user_id(email)')
+        .order('created_at', { ascending: false })
+        .limit(500);
 
-    if (!isAdmin) {
-      query = query.eq('user_id', user.id);
-    }
+      if (!isAdmin) {
+        query = query.eq('user_id', user.id);
+      }
 
-    if (filterModel) {
-      query = query.eq('model_name', filterModel);
-    }
+      if (filterModel) {
+        query = query.eq('model_name', filterModel);
+      }
 
-    if (filterStatus !== 'all') {
-      query = query.eq('is_success', filterStatus === 'success');
-    }
+      if (filterStatus !== 'all') {
+        query = query.eq('is_success', filterStatus === 'success');
+      }
 
-    const { data, error } = await query;
-    if (!error) {
+      return query;
+    });
+
+    if (fetchError) {
+      console.error('Failed to fetch logs:', fetchError);
+      setError('加载日志失败，请点击刷新重试');
+    } else {
       setLogs(data || []);
     }
     setLoading(false);
@@ -77,7 +86,29 @@ export const LogsPage = () => {
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-slate-800">使用日志</h1>
+        <button
+          onClick={fetchLogs}
+          disabled={loading}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          刷新
+        </button>
       </div>
+
+      {/* Error Alert */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+          <p className="text-red-700 text-sm">{error}</p>
+          <button
+            onClick={fetchLogs}
+            className="ml-auto px-3 py-1 text-sm text-red-600 hover:text-red-800 hover:bg-red-100 rounded transition-colors"
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-6">
@@ -176,11 +207,10 @@ export const LogsPage = () => {
                   <td className="px-4 py-3 text-sm font-mono">{log.model_name}</td>
                   <td className="px-4 py-3">
                     <span
-                      className={`px-2 py-1 rounded text-xs ${
-                        log.action_type === 'generate'
-                          ? 'bg-blue-100 text-blue-700'
-                          : 'bg-purple-100 text-purple-700'
-                      }`}
+                      className={`px-2 py-1 rounded text-xs ${log.action_type === 'generate'
+                        ? 'bg-blue-100 text-blue-700'
+                        : 'bg-purple-100 text-purple-700'
+                        }`}
                     >
                       {log.action_type === 'generate' ? '生成' : '编辑'}
                     </span>

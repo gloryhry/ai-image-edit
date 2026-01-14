@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Wallet, ArrowUpCircle, ArrowDownCircle, Gift, Loader2, ExternalLink } from 'lucide-react';
+import { Wallet, ArrowUpCircle, ArrowDownCircle, Gift, Loader2, ExternalLink, RefreshCw, AlertCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { withSessionRefresh } from '../../lib/supabase-request';
 import { useAuth } from '../../contexts/AuthContext';
 import { Button } from '../../components/ui/Button';
 
@@ -8,6 +9,7 @@ export const WalletPage = () => {
   const { profile, refreshProfile } = useAuth();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [redeemCode, setRedeemCode] = useState('');
   const [redeeming, setRedeeming] = useState(false);
   const [redeemResult, setRedeemResult] = useState(null);
@@ -15,14 +17,21 @@ export const WalletPage = () => {
 
   const fetchTransactions = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('wallet_transactions')
-      .select('*')
-      .eq('user_id', profile?.id)
-      .order('created_at', { ascending: false })
-      .limit(100);
+    setError(null);
 
-    if (!error) {
+    const { data, error: fetchError } = await withSessionRefresh(async () => {
+      return supabase
+        .from('wallet_transactions')
+        .select('*')
+        .eq('user_id', profile?.id)
+        .order('created_at', { ascending: false })
+        .limit(100);
+    });
+
+    if (fetchError) {
+      console.error('Failed to fetch transactions:', fetchError);
+      setError('加载交易记录失败，请点击刷新重试');
+    } else {
       setTransactions(data || []);
     }
     setLoading(false);
@@ -111,7 +120,31 @@ export const WalletPage = () => {
 
   return (
     <div className="p-6">
-      <h1 className="text-2xl font-bold text-slate-800 mb-6">钱包管理</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold text-slate-800">钱包管理</h1>
+        <button
+          onClick={() => { fetchTransactions(); refreshProfile(); }}
+          disabled={loading}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          刷新
+        </button>
+      </div>
+
+      {/* Error Alert */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+          <p className="text-red-700 text-sm">{error}</p>
+          <button
+            onClick={fetchTransactions}
+            className="ml-auto px-3 py-1 text-sm text-red-600 hover:text-red-800 hover:bg-red-100 rounded transition-colors"
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       {/* Balance Cards */}
       <div className="grid grid-cols-2 gap-6 mb-6">
@@ -155,11 +188,10 @@ export const WalletPage = () => {
 
         {redeemResult && (
           <div
-            className={`mt-4 p-3 rounded-lg ${
-              redeemResult.success
-                ? 'bg-green-50 text-green-700 border border-green-200'
-                : 'bg-red-50 text-red-700 border border-red-200'
-            }`}
+            className={`mt-4 p-3 rounded-lg ${redeemResult.success
+              ? 'bg-green-50 text-green-700 border border-green-200'
+              : 'bg-red-50 text-red-700 border border-red-200'
+              }`}
           >
             {redeemResult.message}
             {redeemResult.success && (
@@ -203,9 +235,8 @@ export const WalletPage = () => {
                 </div>
                 <div className="text-right">
                   <p
-                    className={`font-bold ${
-                      tx.amount >= 0 ? 'text-green-600' : 'text-red-600'
-                    }`}
+                    className={`font-bold ${tx.amount >= 0 ? 'text-green-600' : 'text-red-600'
+                      }`}
                   >
                     {tx.amount >= 0 ? '+' : ''}
                     {Number(tx.amount).toFixed(4)}

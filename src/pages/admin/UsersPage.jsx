@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Search, Ban, Unlock, Pencil, Save, X, Loader2, KeyRound } from 'lucide-react';
+import { Search, Ban, Unlock, Pencil, Save, X, Loader2, KeyRound, RefreshCw, AlertCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { withSessionRefresh } from '../../lib/supabase-request';
 
 export const UsersPage = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editBalance, setEditBalance] = useState(0);
@@ -12,12 +14,19 @@ export const UsersPage = () => {
 
   const fetchUsers = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .order('created_at', { ascending: false });
+    setError(null);
 
-    if (!error) {
+    const { data, error: fetchError } = await withSessionRefresh(async () => {
+      return supabase
+        .from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false });
+    });
+
+    if (fetchError) {
+      console.error('Failed to fetch users:', fetchError);
+      setError('加载用户列表失败，请点击刷新重试');
+    } else {
       setUsers(data || []);
     }
     setLoading(false);
@@ -76,7 +85,7 @@ export const UsersPage = () => {
 
   const handleResetPassword = async (user) => {
     if (!confirm(`确定要重置用户 ${user.email} 的密码吗？将发送重置邮件到该邮箱。`)) return;
-    
+
     const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
       redirectTo: `${window.location.origin}/reset-password`,
     });
@@ -100,17 +109,41 @@ export const UsersPage = () => {
     <div className="p-6">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-slate-800">用户管理</h1>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            type="text"
-            placeholder="搜索用户..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-10 pr-4 py-2 border rounded-lg w-64"
-          />
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="搜索用户..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-10 pr-4 py-2 border rounded-lg w-64"
+            />
+          </div>
+          <button
+            onClick={fetchUsers}
+            disabled={loading}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            刷新
+          </button>
         </div>
       </div>
+
+      {/* Error Alert */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+          <p className="text-red-700 text-sm">{error}</p>
+          <button
+            onClick={fetchUsers}
+            className="ml-auto px-3 py-1 text-sm text-red-600 hover:text-red-800 hover:bg-red-100 rounded transition-colors"
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -179,18 +212,16 @@ export const UsersPage = () => {
                 <td className="px-4 py-3 text-sm text-slate-500">¥{Number(user.total_spent).toFixed(4)}</td>
                 <td className="px-4 py-3">
                   <span
-                    className={`px-2 py-1 rounded text-xs ${
-                      user.is_admin ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'
-                    }`}
+                    className={`px-2 py-1 rounded text-xs ${user.is_admin ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'
+                      }`}
                   >
                     {user.is_admin ? '管理员' : '普通用户'}
                   </span>
                 </td>
                 <td className="px-4 py-3">
                   <span
-                    className={`px-2 py-1 rounded text-xs ${
-                      user.is_banned ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
-                    }`}
+                    className={`px-2 py-1 rounded text-xs ${user.is_banned ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                      }`}
                   >
                     {user.is_banned ? '已封禁' : '正常'}
                   </span>
@@ -209,11 +240,10 @@ export const UsersPage = () => {
                     </button>
                     <button
                       onClick={() => handleToggleBan(user)}
-                      className={`p-1 rounded ${
-                        user.is_banned
-                          ? 'text-green-600 hover:bg-green-50'
-                          : 'text-red-600 hover:bg-red-50'
-                      }`}
+                      className={`p-1 rounded ${user.is_banned
+                        ? 'text-green-600 hover:bg-green-50'
+                        : 'text-red-600 hover:bg-red-50'
+                        }`}
                       title={user.is_banned ? '解除封禁' : '封禁用户'}
                     >
                       {user.is_banned ? <Unlock className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
