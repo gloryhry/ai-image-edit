@@ -13,6 +13,11 @@ const AUTH_OPTIONS = {
   detectSessionInUrl: true,
   storageKey: 'ai-image-edit-auth',
   flowType: 'pkce',
+  // 禁用 Web Locks，避免页面后台时 Lock 超时导致 AbortError
+  // 参考: https://github.com/supabase/gotrue-js/issues/540
+  lock: false,
+  // 如果使用 lock: false 不生效，尝试增加超时时间
+  debug: false,
 };
 
 // 创建 Supabase 客户端
