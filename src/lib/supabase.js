@@ -7,48 +7,88 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('Supabase URL or Anon Key not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-    storageKey: 'ai-image-edit-auth',
-    flowType: 'pkce',
+const AUTH_OPTIONS = {
+  persistSession: true,
+  autoRefreshToken: true,
+  detectSessionInUrl: true,
+  storageKey: 'ai-image-edit-auth',
+  flowType: 'pkce',
+};
+
+// 创建初始客户端
+let _supabase = createClient(supabaseUrl, supabaseAnonKey, { auth: AUTH_OPTIONS });
+
+// 健康检查：测试客户端是否能正常发请求
+async function isClientHealthy() {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    
+    // 发一个简单的请求测试连通性
+    const response = await fetch(`${supabaseUrl}/rest/v1/`, {
+      method: 'HEAD',
+      signal: controller.signal,
+      headers: {
+        'apikey': supabaseAnonKey,
+      },
+    });
+    clearTimeout(timeoutId);
+    return response.ok || response.status === 400; // 400 也说明网络通
+  } catch {
+    return false;
+  }
+}
+
+// 重建客户端
+function recreateClient() {
+  console.warn('[Supabase] Recreating client...');
+  _supabase = createClient(supabaseUrl, supabaseAnonKey, { auth: AUTH_OPTIONS });
+  return _supabase;
+}
+
+// 导出代理对象，自动处理客户端健康状态
+export const supabase = new Proxy({}, {
+  get(_, prop) {
+    return _supabase[prop];
   },
 });
 
-// 页面可见性变化时尝试刷新 session，解决后台 tab 长时间不活跃导致 session 过期的问题
+// 暴露重建方法供手动调用
+export function resetSupabaseClient() {
+  return recreateClient();
+}
+
+// 页面可见性变化时检查并恢复客户端
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible') {
+      console.log('[Supabase] Page visible, checking client health...');
+      const healthy = await isClientHealthy();
+      if (!healthy) {
+        console.warn('[Supabase] Client unhealthy, recreating...');
+        recreateClient();
+      }
+      
+      // 尝试刷新 session
       try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (session && !error) {
-          // 主动刷新 session 以确保 token 有效
-          await supabase.auth.refreshSession();
+        const { data: { session } } = await _supabase.auth.getSession();
+        if (session) {
+          await _supabase.auth.refreshSession();
         }
       } catch (e) {
-        console.warn('Session refresh on visibility change failed:', e);
+        console.warn('[Supabase] Session refresh failed:', e);
       }
     }
   });
 }
 
-// 定期检查并刷新 session（每 4 分钟），防止长时间使用时 token 过期
+// 定期健康检查（每 2 分钟）
 if (typeof window !== 'undefined') {
   setInterval(async () => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        // 检查 token 是否即将过期（剩余时间 < 5 分钟）
-        const expiresAt = session.expires_at;
-        const now = Math.floor(Date.now() / 1000);
-        if (expiresAt && expiresAt - now < 300) {
-          await supabase.auth.refreshSession();
-        }
-      }
-    } catch (e) {
-      console.warn('Periodic session refresh failed:', e);
+    const healthy = await isClientHealthy();
+    if (!healthy) {
+      console.warn('[Supabase] Periodic health check failed, recreating client...');
+      recreateClient();
     }
-  }, 4 * 60 * 1000); // 4 分钟
+  }, 2 * 60 * 1000);
 }

@@ -77,7 +77,9 @@ async function getAccessToken() {
  * @returns {Promise<{mimeType: string, base64: string}>}
  */
 export async function generateImage({ prompt, modelId, modelName, aspectRatio = '1:1', size = '2k' }) {
+  console.log('[DEBUG] generateImage called');
   const token = await getAccessToken();
+  console.log('[DEBUG] token obtained:', token ? 'yes' : 'no');
   
   const response = await fetch(`${API_BASE_URL}/ai-image`, {
     method: 'POST',

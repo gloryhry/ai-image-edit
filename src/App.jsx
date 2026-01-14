@@ -247,9 +247,11 @@ function App() {
     }
 
     setIsGenerating(true);
+    console.log('[DEBUG] handleGenerate started, mode:', mode);
 
     try {
       if (mode === 'generate') {
+        console.log('[DEBUG] calling generateImage...');
         const { mimeType, base64 } = await generateImage({
           prompt,
           modelId: selectedModelId,
