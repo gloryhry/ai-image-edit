@@ -34,27 +34,64 @@ export const AuthProvider = ({ children }) => {
   };
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    let subscription = null;
+
+    const initAuth = async () => {
+      // 获取当前 Session
+      const { data: { session } } = await supabase.auth.getSession();
       setUser(session?.user ?? null);
       if (session?.user) {
         fetchProfile(session.user.id);
       }
       setLoading(false);
-    });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        setUser(session?.user ?? null);
-        if (session?.user) {
-          await fetchProfile(session.user.id);
-        } else {
-          setProfile(null);
+      // 设置监听器
+      const { data } = supabase.auth.onAuthStateChange(
+        async (event, session) => {
+          setUser(session?.user ?? null);
+          if (session?.user) {
+            await fetchProfile(session.user.id);
+          } else {
+            setProfile(null);
+          }
+          setLoading(false);
         }
-        setLoading(false);
-      }
-    );
+      );
+      subscription = data.subscription;
+    };
 
-    return () => subscription.unsubscribe();
+    // 初始化
+    initAuth();
+
+    // 防抖：记录上次初始化时间
+    let lastInitTime = 0;
+    const MIN_INIT_INTERVAL = 3000; // 最小初始化间隔 3 秒
+
+    // 监听客户端重建事件
+    const handleClientRecreated = () => {
+      const now = Date.now();
+      if (now - lastInitTime < MIN_INIT_INTERVAL) {
+        console.log('[AuthContext] Skipping re-init, too soon after last init');
+        return;
+      }
+      lastInitTime = now;
+
+      console.log('[AuthContext] Client recreated, re-subscribing...');
+      if (subscription) {
+        subscription.unsubscribe();
+      }
+      // 使用 setTimeout 延迟初始化，让其他操作有机会完成
+      setTimeout(() => {
+        initAuth();
+      }, 500);
+    };
+
+    window.addEventListener('supabase:client-recreated', handleClientRecreated);
+
+    return () => {
+      if (subscription) subscription.unsubscribe();
+      window.removeEventListener('supabase:client-recreated', handleClientRecreated);
+    };
   }, []);
 
   const signInWithEmail = async (email, password) => {

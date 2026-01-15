@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Search, Filter, Loader2, CheckCircle, XCircle, RefreshCw, AlertCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { withSessionRefresh } from '../../lib/supabase-request';
@@ -7,7 +7,7 @@ import { useAuth } from '../../contexts/AuthContext';
 export const LogsPage = () => {
   console.log('[LogsPage] Component rendering...');
 
-  const { isAdmin, user } = useAuth();
+  const { isAdmin, user, loading: authLoading } = useAuth();
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -16,10 +16,29 @@ export const LogsPage = () => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [models, setModels] = useState([]);
 
-  console.log('[LogsPage] Auth state:', { isAdmin, userId: user?.id, loading });
+  // 用于追踪请求状态，避免重复请求
+  const fetchingRef = useRef(false);
+  // 用于追踪页面是否需要刷新
+  const needsRefreshRef = useRef(false);
 
-  const fetchLogs = async () => {
+  console.log('[LogsPage] Auth state:', { isAdmin, userId: user?.id, authLoading });
+
+  const fetchLogs = useCallback(async (force = false) => {
+    // 防止重复请求
+    if (fetchingRef.current && !force) {
+      console.log('[LogsPage] fetchLogs skipped - already fetching');
+      return;
+    }
+
+    // 如果认证还在加载中，跳过请求
+    if (authLoading) {
+      console.log('[LogsPage] fetchLogs skipped - auth loading');
+      needsRefreshRef.current = true;
+      return;
+    }
+
     console.log('[LogsPage] fetchLogs called');
+    fetchingRef.current = true;
     setLoading(true);
     setError(null);
 
@@ -55,6 +74,7 @@ export const LogsPage = () => {
         setError('加载日志失败，请点击刷新重试');
       } else {
         setLogs(data || []);
+        setError(null);
       }
     } catch (e) {
       console.error('[LogsPage] Exception in fetchLogs:', e);
@@ -62,7 +82,8 @@ export const LogsPage = () => {
     }
 
     setLoading(false);
-  };
+    fetchingRef.current = false;
+  }, [isAdmin, user?.id, filterModel, filterStatus, authLoading]);
 
   const fetchModels = async () => {
     console.log('[LogsPage] fetchModels called');
@@ -77,10 +98,53 @@ export const LogsPage = () => {
     fetchModels();
   }, []);
 
+  // 当认证完成后，检查是否需要刷新
   useEffect(() => {
-    console.log('[LogsPage] useEffect[filterModel, filterStatus, isAdmin] triggered - fetching logs');
-    fetchLogs();
-  }, [filterModel, filterStatus, isAdmin]);
+    if (!authLoading && needsRefreshRef.current) {
+      console.log('[LogsPage] Auth completed, triggering delayed fetch');
+      needsRefreshRef.current = false;
+      fetchLogs();
+    }
+  }, [authLoading, fetchLogs]);
+
+  useEffect(() => {
+    // 只有在认证完成后才发起请求
+    if (!authLoading) {
+      console.log('[LogsPage] useEffect[filterModel, filterStatus, isAdmin] triggered - fetching logs');
+      fetchLogs();
+    }
+  }, [filterModel, filterStatus, isAdmin, authLoading, fetchLogs]);
+
+  // 监听页面可见性变化，页面恢复时重新加载数据
+  useEffect(() => {
+    let lastHiddenTime = 0;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenTime = Date.now();
+      } else if (document.visibilityState === 'visible') {
+        const hiddenDuration = Date.now() - lastHiddenTime;
+        console.log('[LogsPage] Page became visible after', hiddenDuration, 'ms');
+
+        // 只有后台超过 10 秒才需要刷新（与 supabase.js 的重建阈值一致）
+        if (hiddenDuration > 10000) {
+          console.log('[LogsPage] Long idle, scheduling refresh...');
+          // 等待 1.5 秒，确保 Supabase 客户端已经重建完成
+          setTimeout(() => {
+            if (!authLoading) {
+              console.log('[LogsPage] Refreshing data after visibility change');
+              fetchLogs(true); // force refresh
+            }
+          }, 1500);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [authLoading, fetchLogs]);
 
   const filteredLogs = logs.filter((log) => {
     if (!search) return true;

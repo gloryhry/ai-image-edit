@@ -7,9 +7,42 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('Supabase URL or Anon Key not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
 }
 
+// 自定义 fetch 包装器：使用 AbortController 强制超时
+// 解决浏览器后台标签页冻结 fetch 请求的问题
+const FETCH_TIMEOUT_MS = 25000; // 25 秒超时（比 withSessionRefresh 的 30 秒短）
+
+function createFetchWithTimeout(timeoutMs = FETCH_TIMEOUT_MS) {
+  return async (url, options = {}) => {
+    console.log('[Supabase Fetch] Starting request to:', url.substring(0, 80) + '...');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn('[Supabase Fetch] Request timeout after', timeoutMs, 'ms, aborting...', url.substring(0, 50));
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      console.log('[Supabase Fetch] Request completed:', response.status);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.error('[Supabase Fetch] Request failed:', error.name, error.message);
+      if (error.name === 'AbortError') {
+        console.warn('[Supabase Fetch] Request aborted due to timeout');
+      }
+      throw error;
+    }
+  };
+}
+
 const AUTH_OPTIONS = {
   persistSession: true,
-  autoRefreshToken: true,
+  autoRefreshToken: false, //  禁用自动刷新，由应用层控制
   detectSessionInUrl: true,
   storageKey: 'ai-image-edit-auth',
   flowType: 'pkce',
@@ -20,8 +53,44 @@ const AUTH_OPTIONS = {
   debug: false,
 };
 
-// 创建 Supabase 客户端
-let _supabase = createClient(supabaseUrl, supabaseAnonKey, { auth: AUTH_OPTIONS });
+// Supabase 客户端配置
+const CLIENT_OPTIONS = {
+  auth: AUTH_OPTIONS,
+  global: {
+    fetch: createFetchWithTimeout(FETCH_TIMEOUT_MS),
+  },
+};
+
+// 认证状态监听器引用
+let _authListener = null;
+
+// 设置认证监听器
+function setupAuthListener(client) {
+  if (_authListener) {
+    _authListener.unsubscribe();
+    _authListener = null;
+  }
+
+  const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+    console.log('[Supabase] Auth state changed:', event);
+
+    if (event === 'TOKEN_REFRESHED') {
+      console.log('[Supabase] Token was refreshed automatically');
+      markRequestSuccess();
+    }
+
+    if (event === 'SIGNED_OUT') {
+      console.log('[Supabase] User signed out');
+    }
+  });
+
+  _authListener = subscription;
+  console.log('[Supabase] Auth listener attached');
+}
+
+// 创建 Supabase 客户端（使用自定义 fetch）
+let _supabase = createClient(supabaseUrl, supabaseAnonKey, CLIENT_OPTIONS);
+setupAuthListener(_supabase);
 
 // 客户端健康状态标记
 let _clientHealthy = true;
@@ -49,9 +118,15 @@ export function isClientPossiblyUnhealthy() {
 export function recreateClient() {
   console.warn('[Supabase] Recreating client...');
   try {
-    _supabase = createClient(supabaseUrl, supabaseAnonKey, { auth: AUTH_OPTIONS });
+    _supabase = createClient(supabaseUrl, supabaseAnonKey, CLIENT_OPTIONS);
+    setupAuthListener(_supabase);
     _clientHealthy = true;
     console.log('[Supabase] Client recreated successfully');
+
+    // 派发事件通知客户端已重建，需要重新绑定监听器
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('supabase:client-recreated'));
+    }
   } catch (e) {
     console.error('[Supabase] Failed to recreate client:', e);
   }
@@ -101,39 +176,62 @@ export function resetSupabaseClient() {
   return recreateClient();
 }
 
-// 仅在页面变为可见时尝试刷新（非阻塞）
+// 添加页面可见性变化处理，优化页面从后台恢复时的连接恢复
 if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      console.log('[Supabase] Page became visible');
+  let lastHiddenTime = 0;
 
-      // 如果客户端可能不健康，尝试刷新（但不阻塞）
-      if (isClientPossiblyUnhealthy()) {
-        // 使用 setTimeout 确保不阻塞 UI
-        setTimeout(() => {
-          tryRefreshSession().catch(() => {
-            // 刷新失败，重建客户端
-            recreateClient();
-          });
-        }, 100);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      // 记录页面隐藏时间
+      lastHiddenTime = Date.now();
+      console.log('[Supabase] Page hidden');
+    } else if (document.visibilityState === 'visible') {
+      // 页面恢复可见
+      const hiddenDuration = Date.now() - lastHiddenTime;
+      console.log('[Supabase] Page became visible after', hiddenDuration, 'ms');
+
+      // 如果页面隐藏时间超过 10 秒，需要静默重建客户端
+      // 因为 Supabase 客户端内部状态可能被浏览器冻结
+      if (hiddenDuration > 10000) {
+        console.log('[Supabase] Long idle detected, silently recreating client...');
+
+        try {
+          // 先清理旧的监听器
+          if (_authListener) {
+            try {
+              _authListener.unsubscribe();
+            } catch (e) {
+              // 忽略取消订阅时的错误
+            }
+            _authListener = null;
+          }
+
+          // 创建新客户端
+          _supabase = createClient(supabaseUrl, supabaseAnonKey, CLIENT_OPTIONS);
+          _clientHealthy = true;
+          _lastSuccessfulRequest = Date.now();
+
+          // 延迟设置 auth listener 和派发事件
+          setTimeout(() => {
+            setupAuthListener(_supabase);
+
+            // 派发事件通知 AuthContext 重新订阅（延迟派发，避免立即触发）
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new Event('supabase:client-recreated'));
+            }
+          }, 200);
+
+          console.log('[Supabase] Client silently recreated');
+        } catch (e) {
+          console.error('[Supabase] Failed to recreate client on visibility change:', e);
+        }
       }
     }
   });
 }
 
-// 监听 auth 状态变化（被动监听，不主动轮询）
+// 监听逻辑已移至 setupAuthListener
 if (typeof window !== 'undefined') {
-  _supabase.auth.onAuthStateChange((event, session) => {
-    console.log('[Supabase] Auth state changed:', event);
-
-    if (event === 'TOKEN_REFRESHED') {
-      console.log('[Supabase] Token was refreshed automatically');
-      markRequestSuccess();
-    }
-
-    if (event === 'SIGNED_OUT') {
-      console.log('[Supabase] User signed out');
-    }
-  });
+  // 初始监听已在创建客户端时设置
 }
 
