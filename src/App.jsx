@@ -5,6 +5,7 @@ import { ControlPanel } from './components/ControlPanel';
 import { Layout } from './components/Layout';
 import { Button } from './components/ui/Button';
 import { generateImage, editImage } from './lib/api-proxy';
+import { getBase64ImageDimensions, getDownscaleMultiplier, resizeBase64ImageTo } from './lib/image-resize';
 import { supabase, onConnectionRecovery } from './lib/supabase';
 import { withSessionRefresh } from './lib/supabase-request';
 import { useAuth } from './contexts/AuthContext';
@@ -170,7 +171,7 @@ function App() {
     document.body.removeChild(a);
   };
 
-  const buildMaskBase64 = () => {
+  const buildMaskBase64 = ({ multiplier = 1 } = {}) => {
     const canvas = canvasRef.current;
     if (!canvas) throw new Error('画布未就绪');
     const bgImage = canvas.backgroundImage;
@@ -211,7 +212,7 @@ function App() {
           format: 'png',
           width: bgImage.width,
           height: bgImage.height,
-          multiplier: 1,
+          multiplier,
         });
         return maskData.split(',')[1];
       } finally {
@@ -284,11 +285,28 @@ function App() {
           return;
         }
 
-        const maskBase64 = buildMaskBase64();
+        const canvas = canvasRef.current;
+        const bgImage = canvas?.backgroundImage || null;
+        const originalWidth = bgImage?.width || 0;
+        const originalHeight = bgImage?.height || 0;
+        const multiplier = originalWidth && originalHeight
+          ? getDownscaleMultiplier({ originalWidth, originalHeight, size: imageSize })
+          : 1;
+
+        const maskBase64 = buildMaskBase64({ multiplier });
+
+        let requestImageBase64 = imageBase64;
+        let requestImageMimeType = imageMimeType;
+        if (multiplier < 1) {
+          const { width, height } = await getBase64ImageDimensions({ base64: maskBase64, mimeType: 'image/png' });
+          const resized = await resizeBase64ImageTo({ base64: imageBase64, mimeType: imageMimeType, width, height });
+          requestImageBase64 = resized.base64;
+          requestImageMimeType = resized.mimeType;
+        }
 
         const { mimeType, base64 } = await editImage({
-          imageBase64,
-          imageMimeType,
+          imageBase64: requestImageBase64,
+          imageMimeType: requestImageMimeType,
           maskBase64,
           prompt,
           modelId: selectedModelId,
