@@ -20,6 +20,8 @@ export const LogsPage = () => {
   const fetchingRef = useRef(false);
   // 用于追踪页面是否需要刷新
   const needsRefreshRef = useRef(false);
+  // 用于追踪组件是否已挂载（防止在恢复流程中执行非法操作）
+  const mountedRef = useRef(true);
 
   console.log('[LogsPage] Auth state:', { isAdmin, userId: user?.id, authLoading });
 
@@ -118,6 +120,7 @@ export const LogsPage = () => {
   // 监听页面可见性变化，页面恢复时重新加载数据
   useEffect(() => {
     let lastHiddenTime = 0;
+    let refreshTimeoutId = null;
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
@@ -126,9 +129,14 @@ export const LogsPage = () => {
         const hiddenDuration = Date.now() - lastHiddenTime;
         console.log('[LogsPage] Page became visible after', hiddenDuration, 'ms');
 
+        // 清除之前的刷新定时器
+        if (refreshTimeoutId) {
+          clearTimeout(refreshTimeoutId);
+        }
+
         // Supabase 客户端会在 visibilitychange 时自动恢复连接
         // 等待 500ms 让恢复流程完成，然后刷新数据
-        setTimeout(() => {
+        refreshTimeoutId = setTimeout(() => {
           if (!authLoading && mountedRef.current) {
             console.log('[LogsPage] Refreshing data after visibility change');
             fetchLogs(true); // force refresh
@@ -140,6 +148,10 @@ export const LogsPage = () => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (refreshTimeoutId) {
+        clearTimeout(refreshTimeoutId);
+      }
+      mountedRef.current = false;
     };
   }, [authLoading, fetchLogs]);
 

@@ -1,4 +1,4 @@
-import { supabase, ensureFreshSession, recoverConnection } from './supabase';
+import { supabase, ensureFreshSession } from './supabase';
 
 // 超时包装器，使用 AbortController 确保可以中断
 function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') {
@@ -22,83 +22,74 @@ function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') 
 
 /**
  * 带自动恢复的 Supabase 请求包装器
- * 直接执行请求，失败时尝试刷新 session 或重建连接并重试
- * 
+ * 直接执行请求，超时/失败时等待 SDK 自动恢复
+ *
  * @param {Function} queryFn - 返回 Supabase query 的函数
  * @param {Object} options - 配置选项
- * @param {number} options.maxRetries - 最大重试次数，默认 2
- * @param {number} options.timeoutMs - 超时时间，默认 15 秒（降低以更快检测冻结）
+ * @param {number} options.timeoutMs - 超时时间，默认 20 秒
  * @returns {Promise<{data: any, error: any}>}
  */
-export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 15000 } = {}) {
-    let lastError = null;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            // 使用 withTimeout 包装查询
-            const { promise } = withTimeout(queryFn(), timeoutMs, '查询超时');
-            const result = await promise;
-            const { data, error } = result;
-
-            if (!error) {
-                return { data, error: null };
-            }
-
-            lastError = error;
-            const isAuthError = isAuthenticationError(error);
-            const isAbortError = error.name === 'AbortError' ||
-                error.message?.includes('aborted') ||
-                error.message?.includes('The operation was aborted');
-
-            // AbortError 可能是冻结导致的
-            if (isAbortError && attempt < maxRetries) {
-                console.log(`[SupabaseRequest] AbortError on attempt ${attempt + 1}, triggering recovery...`);
-                await recoverConnection();
-                await new Promise(resolve => setTimeout(resolve, 500));
-                continue;
-            }
-
-            // Auth 错误，刷新 session
-            if (isAuthError && attempt < maxRetries) {
-                console.log(`[SupabaseRequest] Auth error on attempt ${attempt + 1}, refreshing session...`);
-                await ensureFreshSession(5000);
-                continue;
-            }
-
-            return { data, error };
-
-        } catch (e) {
-            lastError = e;
-
-            // 超时错误 - 可能是 SDK 冻结
-            if (e.message === '查询超时' && attempt < maxRetries) {
-                console.log(`[SupabaseRequest] Timeout on attempt ${attempt + 1}, triggering full recovery...`);
-                // 超时很可能是 SDK 冻结，触发完整恢复流程
-                await recoverConnection();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                continue;
-            }
-
-            // AbortError
-            if ((e.name === 'AbortError' || e.message?.includes('aborted')) && attempt < maxRetries) {
-                console.log(`[SupabaseRequest] AbortError (catch) on attempt ${attempt + 1}, triggering recovery...`);
-                await recoverConnection();
-                await new Promise(resolve => setTimeout(resolve, 500));
-                continue;
-            }
-
-            // 网络错误也可能需要恢复
-            if (isNetworkError(e) && attempt < maxRetries) {
-                console.log(`[SupabaseRequest] Network error on attempt ${attempt + 1}, waiting...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                continue;
-            }
-
-            return { data: null, error: e };
+export async function withSessionRefresh(queryFn, { timeoutMs = 20000, refreshOnStart = true } = {}) {
+    try {
+        if (refreshOnStart) {
+            await ensureFreshSession({ timeoutMs: 5000 });
         }
-    }
+        // 使用 withTimeout 包装查询
+        const { promise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+        const result = await promise;
+        const { data, error } = result;
 
-    return { data: null, error: lastError || new Error('Max retries exceeded') };
+        if (!error) {
+            return { data, error: null };
+        }
+
+        // 检查是否是认证错误
+        if (isAuthenticationError(error)) {
+            console.log('[SupabaseRequest] Auth error, refreshing session...');
+            await ensureFreshSession({ timeoutMs: 5000, force: true });
+            // 刷新 session 后重试一次
+            const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+            return retryPromise;
+        }
+
+        return { data, error };
+
+    } catch (e) {
+        // 超时或 AbortError - SDK 可能被冻结
+        if (e.message === '查询超时' || e.name === 'AbortError' || e.message?.includes('aborted')) {
+            console.log('[SupabaseRequest] Request aborted/timeout, waiting for SDK/JS recovery...');
+            // 等待 SDK 和 JavaScript 运行时恢复（浏览器冻结后需要更长时间）
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            await ensureFreshSession({ timeoutMs: 5000 });
+
+            // 重试一次
+            try {
+                const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+                const result = await retryPromise;
+                return result;
+            } catch (retryError) {
+                // 重试也失败，返回错误
+                return { data: null, error: retryError };
+            }
+        }
+
+        // 网络错误 - 等待后重试
+        if (isNetworkError(e)) {
+            console.log('[SupabaseRequest] Network error, waiting and retrying...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            await ensureFreshSession({ timeoutMs: 5000 });
+
+            try {
+                const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+                const result = await retryPromise;
+                return result;
+            } catch (retryError) {
+                return { data: null, error: retryError };
+            }
+        }
+
+        return { data: null, error: e };
+    }
 }
 
 function isAuthenticationError(error) {
@@ -145,4 +136,3 @@ function isNetworkError(error) {
 export async function rpcWithRefresh(rpcName, params, options = {}) {
     return withSessionRefresh(() => supabase.rpc(rpcName, params), options);
 }
-

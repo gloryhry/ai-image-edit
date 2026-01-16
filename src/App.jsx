@@ -6,6 +6,7 @@ import { Layout } from './components/Layout';
 import { Button } from './components/ui/Button';
 import { generateImage, editImage } from './lib/api-proxy';
 import { supabase, onConnectionRecovery } from './lib/supabase';
+import { withSessionRefresh } from './lib/supabase-request';
 import { useAuth } from './contexts/AuthContext';
 
 function App() {
@@ -23,11 +24,13 @@ function App() {
 
   // 加载模型列表
   const fetchModels = useCallback(async () => {
-    const { data: modelsData, error: modelsError } = await supabase
-      .from('models')
-      .select('*')
-      .eq('is_active', true)
-      .order('display_name', { ascending: true });
+    const { data: modelsData, error: modelsError } = await withSessionRefresh(() => (
+      supabase
+        .from('models')
+        .select('*')
+        .eq('is_active', true)
+        .order('display_name', { ascending: true })
+    ), { refreshOnStart: true });
     if (!modelsError && modelsData) {
       setModels(modelsData);
       const savedId = localStorage.getItem('selectedModelId');

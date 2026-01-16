@@ -1,15 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = window.__ENV__?.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = window.__ENV__?.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabaseUrl = (typeof window !== 'undefined' && window.__ENV__?.VITE_SUPABASE_URL) || import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseAnonKey = (typeof window !== 'undefined' && window.__ENV__?.VITE_SUPABASE_ANON_KEY) || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('Supabase URL or Anon Key not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
 }
 
-const FETCH_TIMEOUT_MS = 25000;
-const MIN_HIDDEN_DURATION_FOR_RECOVERY = 0; // 0秒：每次页面恢复都进行健康检查
-const CONNECTION_TEST_TIMEOUT_MS = 5000; // 连接测试超时
+// 注意：认证相关的请求使用更长的超时，因为可能涉及复杂的验证流程
+// 数据库查询超时由 supabase-request.js 中的 withTimeout 控制
+const FETCH_TIMEOUT_MS = 60000; // 60秒，给 auth API 足够的响应时间
+const CONNECTION_TEST_TIMEOUT_MS = 30000; // 连接测试超时：30秒（页面冻结期间需要更长时间）
+const SESSION_REFRESH_TIMEOUT_MS = 8000;
+const SESSION_EXPIRY_BUFFER_SECONDS = 60;
 
 // ============================================
 // Cookie 存储适配器
@@ -17,29 +20,45 @@ const CONNECTION_TEST_TIMEOUT_MS = 5000; // 连接测试超时
 function createCookieStorage() {
   return {
     getItem: (key) => {
-      if (typeof document === 'undefined') return null;
+      if (typeof document === 'undefined') {
+        console.log('[CookieStorage] getItem: document undefined, returning null');
+        return null;
+      }
       const cookies = document.cookie.split(';');
       for (const cookie of cookies) {
         const [name, ...rest] = cookie.trim().split('=');
         if (name === key) {
           try {
-            return decodeURIComponent(rest.join('='));
+            const value = decodeURIComponent(rest.join('='));
+            console.log('[CookieStorage] getItem success:', key, 'value length:', value.length);
+            return value;
           } catch {
+            console.log('[CookieStorage] getItem decode error:', key);
             return null;
           }
         }
       }
+      console.log('[CookieStorage] getItem not found:', key);
       return null;
     },
     setItem: (key, value) => {
-      if (typeof document === 'undefined') return;
+      if (typeof document === 'undefined') {
+        console.log('[CookieStorage] setItem: document undefined, skipping');
+        return;
+      }
       const isSecure = window.location.protocol === 'https:';
       const maxAge = 60 * 60 * 24 * 365; // 1 年
-      document.cookie = `${key}=${encodeURIComponent(value)};path=/;max-age=${maxAge};SameSite=Lax${isSecure ? ';Secure' : ''}`;
+      const cookieString = `${key}=${encodeURIComponent(value)};path=/;max-age=${maxAge};SameSite=Lax${isSecure ? ';Secure' : ''}`;
+      document.cookie = cookieString;
+      console.log('[CookieStorage] setItem:', key, 'value length:', value.length, 'isSecure:', isSecure);
     },
     removeItem: (key) => {
-      if (typeof document === 'undefined') return;
+      if (typeof document === 'undefined') {
+        console.log('[CookieStorage] removeItem: document undefined, skipping');
+        return;
+      }
       document.cookie = `${key}=;path=/;max-age=0`;
+      console.log('[CookieStorage] removeItem:', key);
     },
   };
 }
@@ -50,7 +69,15 @@ function createCookieStorage() {
 let supabaseInstance = null;
 let clientVersion = 0; // 用于追踪客户端重建
 let isRecoveryInProgress = false; // 全局恢复锁，防止重复触发
-let currentAbortController = null; // 用于中断待处理的请求
+const activeAbortControllers = new Set(); // 追踪所有活跃的 AbortController
+let lastRecoveryTime = 0; // 上次恢复时间
+const MIN_RECOVERY_INTERVAL = 3000; // 最小恢复间隔 3 秒
+let recoveryCooldown = false; // 恢复冷却期
+let lastHiddenTime = 0; // 页面最后隐藏时间，供 recoverConnection 使用
+let cachedSession = null;
+let cachedUser = null;
+let sessionUpdatedAt = 0;
+let sessionRefreshPromise = null;
 
 function createSupabaseClient() {
   clientVersion++;
@@ -73,11 +100,14 @@ function createSupabaseClient() {
 
 // 创建可中断的 fetch
 function createFetchWithAbortable() {
+  // Supabase URL 用于判断是否是 Supabase 发出的请求
+  const isSupabaseRequest = (url) => url.includes(supabaseUrl);
+
   return async (url, options = {}) => {
     // 如果有外部传入的 signal，使用它；否则创建新的
     const externalSignal = options.signal;
     const controller = new AbortController();
-    currentAbortController = controller; // 追踪当前请求
+    activeAbortControllers.add(controller); // 追踪所有活跃请求
 
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
@@ -89,12 +119,19 @@ function createFetchWithAbortable() {
     try {
       const response = await fetch(url, {
         ...options,
+        // Supabase 请求：使用 same-origin（同源，自动携带 cookies）
+        // 外部请求（如 API 服务器）：使用 include 以支持跨域 cookies
+        credentials: isSupabaseRequest(url)
+          ? (options.credentials || 'same-origin')
+          : (options.credentials || 'include'),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
+      activeAbortControllers.delete(controller);
       return response;
     } catch (error) {
       clearTimeout(timeoutId);
+      activeAbortControllers.delete(controller);
       throw error;
     }
   };
@@ -103,9 +140,39 @@ function createFetchWithAbortable() {
 // 初始化客户端
 supabaseInstance = createSupabaseClient();
 
+function updateCachedSession(session) {
+  cachedSession = session || null;
+  cachedUser = session?.user ?? null;
+  sessionUpdatedAt = Date.now();
+}
+
+// 初始化 session 缓存
+supabaseInstance.auth.onAuthStateChange((event, session) => {
+  console.log('[Supabase] Auth state changed:', event);
+  updateCachedSession(session);
+});
+
+// 尽量在启动时预热 session，避免首次请求卡顿
+setTimeout(async () => {
+  try {
+    const { data } = await withTimeout(
+      supabaseInstance.auth.getSession(),
+      SESSION_REFRESH_TIMEOUT_MS
+    );
+    updateCachedSession(data?.session || null);
+  } catch (e) {
+    console.warn('[Supabase] Session preheat failed:', e.message);
+  }
+}, 0);
+
 // 导出的 supabase 对象 - 使用 Proxy 确保始终指向最新实例
 export const supabase = new Proxy({}, {
   get: (_, prop) => {
+    // 如果实例需要更新，先更新再返回
+    if (clientInstanceNeedsUpdate) {
+      console.log('[Supabase] Updating Proxy to new client instance v' + clientVersion);
+      clientInstanceNeedsUpdate = false;
+    }
     return supabaseInstance[prop];
   },
 });
@@ -136,17 +203,17 @@ async function testConnectionHealth() {
 }
 
 // ============================================
-// 客户端重建
+// 客户端重建（仅作为最后手段，保留但不推荐使用）
 // ============================================
+let clientInstanceNeedsUpdate = false; // 标记是否需要更新实例引用
+
 async function rebuildClient() {
   console.log('[Supabase] Rebuilding Supabase client...');
 
   try {
     // 保存当前 session 数据（从 Cookie 读取）
     const storage = createCookieStorage();
-    const sessionData = storage.getItem('ai-image-edit-auth');
-
-    // 清理旧实例的 Realtime 连接
+        // 清理旧实例的 Realtime 连接
     try {
       await supabaseInstance.removeAllChannels();
     } catch (e) {
@@ -155,6 +222,7 @@ async function rebuildClient() {
 
     // 创建新实例
     supabaseInstance = createSupabaseClient();
+    clientInstanceNeedsUpdate = true;
 
     // Session 会自动从 Cookie 恢复（通过 storage 适配器）
     console.log('[Supabase] Client rebuilt successfully, version:', clientVersion);
@@ -182,36 +250,99 @@ async function withTimeout(promise, timeoutMs) {
   }
 }
 
-export async function refreshSession(timeoutMs = 5000) {
-  try {
-    const { data: { session } } = await withTimeout(
-      supabaseInstance.auth.getSession(),
-      timeoutMs
-    );
+function isSessionExpiring(session) {
+  if (!session?.expires_at) return true;
+  const now = Math.floor(Date.now() / 1000);
+  return session.expires_at - now <= SESSION_EXPIRY_BUFFER_SECONDS;
+}
 
-    if (!session) {
+async function getSessionWithTimeout(timeoutMs) {
+  const { data } = await withTimeout(
+    supabaseInstance.auth.getSession(),
+    timeoutMs
+  );
+  return data?.session || null;
+}
+
+async function refreshSessionInternal(timeoutMs) {
+  console.log('[Supabase] Calling auth.refreshSession()...');
+  const { data, error } = await withTimeout(
+    supabaseInstance.auth.refreshSession(),
+    timeoutMs
+  );
+  if (error) {
+    console.warn('[Supabase] Session refresh error:', error.message);
+    return null;
+  }
+  if (data?.session) {
+    updateCachedSession(data.session);
+    return data.session;
+  }
+  return null;
+}
+
+export async function refreshSession(options = {}) {
+  const { timeoutMs = SESSION_REFRESH_TIMEOUT_MS } = options;
+  try {
+    const session = await refreshSessionInternal(timeoutMs);
+    if (session) {
+      return session;
+    }
+    const existing = await getSessionWithTimeout(timeoutMs);
+    if (existing) {
+      updateCachedSession(existing);
+    }
+    return existing;
+  } catch (e) {
+    console.warn('[Supabase] refreshSession exception:', e.message);
+    try {
+      const fallback = await getSessionWithTimeout(timeoutMs);
+      if (fallback) {
+        updateCachedSession(fallback);
+      }
+      return fallback;
+    } catch (fallbackError) {
+      console.warn('[Supabase] refreshSession fallback failed:', fallbackError.message);
       return null;
     }
+  }
+}
 
-    const expiresAt = session.expires_at * 1000;
-    const refreshThreshold = 60 * 1000;
+export async function ensureFreshSession(options = {}) {
+  const opts = typeof options === 'number' ? { timeoutMs: options } : options;
+  const {
+    timeoutMs = SESSION_REFRESH_TIMEOUT_MS,
+    force = false,
+  } = opts;
 
-    if (expiresAt - Date.now() < refreshThreshold) {
-      const { data, error } = await withTimeout(
-        supabaseInstance.auth.refreshSession(),
-        timeoutMs
-      );
-      if (error) {
-        console.warn('[Supabase] Session refresh failed:', error.message);
-        return session;
+  if (sessionRefreshPromise) {
+    return sessionRefreshPromise;
+  }
+
+  if (!force && cachedSession && !isSessionExpiring(cachedSession)) {
+    return cachedSession;
+  }
+
+  sessionRefreshPromise = (async () => {
+    const refreshed = await refreshSession({ timeoutMs });
+    if (!refreshed) {
+      try {
+        const current = await getSessionWithTimeout(timeoutMs);
+        if (current) {
+          updateCachedSession(current);
+          return current;
+        }
+      } catch (e) {
+        console.warn('[Supabase] ensureFreshSession getSession failed:', e.message);
       }
-      return data?.session || session;
     }
+    return refreshed || null;
+  })();
 
-    return session;
-  } catch (e) {
-    console.warn('[Supabase] refreshSession error:', e.message);
-    return null;
+  try {
+    return await sessionRefreshPromise;
+  } finally {
+    sessionRefreshPromise = null;
   }
 }
 
@@ -264,33 +395,25 @@ function executeRecoveryCallbacks() {
 // 快速 SDK 响应测试
 // ============================================
 async function testSdkResponsiveness() {
-  const controller = new AbortController();
-  const timeoutMs = 3000; // 3秒快速测试
-
-  return new Promise((resolve) => {
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-      resolve(false);
-    }, timeoutMs);
-
-    // 尝试一个轻量级的 SDK 操作
-    supabaseInstance.auth.getSession()
-      .then(() => {
-        clearTimeout(timeoutId);
-        resolve(true);
-      })
-      .catch(() => {
-        clearTimeout(timeoutId);
-        resolve(false);
-      });
-  });
+  // 使用原生 fetch 测试 REST API 可达性（绕过可能冻结的 SDK）
+  return await testConnectionHealth();
 }
 
 // ============================================
-// 主恢复流程 - 激进策略
+// 主恢复流程 - 等待 SDK 自动恢复，不再重建客户端
 // ============================================
 export async function recoverConnection(options = {}) {
   const { force = false, quickCheck = false } = options;
+
+  // 检查是否在冷却期
+  if (recoveryCooldown && !force) {
+    const timeSinceLastRecovery = Date.now() - lastRecoveryTime;
+    if (timeSinceLastRecovery < MIN_RECOVERY_INTERVAL) {
+      console.log(`[Supabase] Recovery in cooldown (${timeSinceLastRecovery}ms), skipping...`);
+      return { success: false, skipped: true, cooldown: true };
+    }
+    recoveryCooldown = false;
+  }
 
   // 防止重复触发恢复流程
   if (isRecoveryInProgress && !force) {
@@ -299,46 +422,69 @@ export async function recoverConnection(options = {}) {
   }
 
   isRecoveryInProgress = true;
-  console.log('[Supabase] Starting connection recovery...', { quickCheck, force });
+  lastRecoveryTime = Date.now();
+  const hiddenDuration = Date.now() - lastHiddenTime;
+  console.log('[Supabase] Starting connection recovery...', { quickCheck, force, hiddenDuration });
 
   try {
-    // 0. 先中断所有待处理的请求，防止阻塞
-    if (currentAbortController) {
-      try {
-        currentAbortController.abort();
-        console.log('[Supabase] Aborted pending requests');
-      } catch (e) {
-        // 忽略中断错误
-      }
-      currentAbortController = null;
+    // 0. 清除活跃请求列表（页面冻结期间这些请求可能已失效）
+    // 不再中止它们，因为浏览器已经处理了这些请求
+    const pendingCount = activeAbortControllers.size;
+    if (pendingCount > 0) {
+      console.log(`[Supabase] Clearing ${pendingCount} pending requests (may be stale from freeze)`);
+      activeAbortControllers.clear();
     }
 
-    // 等待一小段时间让中断生效
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // 1. 等待 SDK 自动恢复
+    // 浏览器冻结页面后，需要更长时间让 JavaScript 运行时和 SDK 内部状态恢复
+    // 页面长时间隐藏后需要更长的恢复时间
+    const recoveryWaitTime = hiddenDuration > 60000 ? 10000 : (hiddenDuration > 30000 ? 5000 : 3000);
+    console.log(`[Supabase] Hidden for ${hiddenDuration}ms, waiting ${recoveryWaitTime}ms for SDK recovery...`);
+    await new Promise(resolve => setTimeout(resolve, recoveryWaitTime));
 
-    // 1. 快速测试 SDK 是否响应（快速模式下用更短的超时）
-    const sdkResponsive = await testSdkResponsiveness();
-    console.log('[Supabase] SDK responsiveness:', sdkResponsive ? 'OK' : 'FROZEN');
+    // 2. 测试 API 连通性（使用原生 fetch，绕过可能冻结的 SDK）
+    const apiReachable = await testConnectionHealth();
+    console.log('[Supabase] API reachable:', apiReachable ? 'YES' : 'NO');
 
-    // 2. 如果 SDK 无响应，立即重建客户端
-    if (!sdkResponsive) {
-      console.log('[Supabase] SDK frozen, forcing rebuild...');
-      await rebuildClient();
+    // 3. 如果 API 不可达，等待更长时间
+    if (!apiReachable) {
+      console.log('[Supabase] API not reachable, waiting longer for network recovery...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
-    // 3. 尝试刷新 Session（快速模式下跳过）
+    // 4. 尝试刷新 Session（快速模式下跳过）
     let session = null;
     if (!quickCheck) {
-      try {
-        session = await refreshSession(3000);
-        console.log('[Supabase] Session status:', session ? 'valid' : 'none');
-      } catch (e) {
-        // Session 刷新失败不再重复重建，避免循环
-        console.warn('[Supabase] Session refresh failed, continuing without session');
+      let retryCount = 0;
+      const maxRetries = hiddenDuration > 60000 ? 3 : 2;
+
+      while (retryCount < maxRetries) {
+        try {
+          console.log(`[Supabase] Session refresh attempt ${retryCount + 1}/${maxRetries}...`);
+          session = await ensureFreshSession({ timeoutMs: SESSION_REFRESH_TIMEOUT_MS, force: retryCount > 0 });
+          if (session) {
+            console.log('[Supabase] Session status: valid');
+            break;
+          }
+        } catch (e) {
+          console.warn(`[Supabase] Session refresh attempt ${retryCount + 1} failed:`, e.message);
+        }
+
+        retryCount++;
+        if (retryCount < maxRetries) {
+          // 等待更长时间让 SDK 完全恢复
+          const waitTime = hiddenDuration > 60000 ? 3000 : 2000;
+          console.log(`[Supabase] Waiting ${waitTime}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+
+      if (!session) {
+        console.log('[Supabase] Session status: none (after all retries)');
       }
     }
 
-    // 4. 重连 Realtime（快速模式下跳过）
+    // 5. 重连 Realtime（快速模式下跳过）
     if (!quickCheck) {
       try {
         await reconnectRealtime();
@@ -347,7 +493,7 @@ export async function recoverConnection(options = {}) {
       }
     }
 
-    // 5. 触发恢复事件
+    // 6. 触发恢复事件
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('supabase:recovered', {
         detail: {
@@ -359,22 +505,16 @@ export async function recoverConnection(options = {}) {
       }));
     }
 
-    // 6. 执行回调
+    // 7. 执行回调
     executeRecoveryCallbacks();
 
     console.log('[Supabase] Connection recovery completed, client version:', clientVersion);
     return { success: true, session, quickCheck };
   } catch (e) {
-    console.error('[Supabase] Connection recovery failed:', e);
+    console.error('[Supabase] Connection recovery error:', e);
 
-    // 最后手段：强制重建客户端
-    try {
-      await rebuildClient();
-      executeRecoveryCallbacks();
-      return { success: true, session: null, rebuilt: true };
-    } catch (rebuildError) {
-      return { success: false, error: e };
-    }
+    // 即使出错也不再重建客户端
+    return { success: false, error: e };
   } finally {
     // 确保恢复锁被释放
     isRecoveryInProgress = false;
@@ -385,24 +525,67 @@ export async function recoverConnection(options = {}) {
 // 页面可见性监听
 // ============================================
 if (typeof document !== 'undefined') {
-  let lastHiddenTime = 0;
+  let pendingVisibilityCheck = null; // 待处理的可见性检查
 
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'hidden') {
       lastHiddenTime = Date.now();
       console.log('[Supabase] Page hidden');
+      // 取消待处理的检查
+      if (pendingVisibilityCheck) {
+        clearTimeout(pendingVisibilityCheck);
+        pendingVisibilityCheck = null;
+      }
     } else if (document.visibilityState === 'visible') {
       const hiddenDuration = Date.now() - lastHiddenTime;
       console.log('[Supabase] Page visible after', hiddenDuration, 'ms');
 
-      // 每次页面恢复都进行健康检查
-      // 短时间切换（<3秒）使用快速检查，长时间切换使用完整检查
-      const quickCheck = hiddenDuration < 3000;
-      await recoverConnection({ quickCheck });
+      // 取消之前的待处理检查
+      if (pendingVisibilityCheck) {
+        clearTimeout(pendingVisibilityCheck);
+      }
+
+      // 延迟执行检查，确保不会在页面切换时立即触发
+      pendingVisibilityCheck = setTimeout(async () => {
+        pendingVisibilityCheck = null;
+
+        // 短时间切换（<3秒）使用快速检查，长时间切换使用完整检查
+        const quickCheck = hiddenDuration < 3000;
+        await recoverConnection({ quickCheck });
+        if (!quickCheck) {
+          await ensureFreshSession({ timeoutMs: SESSION_REFRESH_TIMEOUT_MS });
+        }
+      }, 100);
     }
   });
 }
 
-// 兼容性别名
-export const ensureFreshSession = refreshSession;
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    console.log('[Supabase] Network back online, running recovery...');
+    recoverConnection({ quickCheck: false });
+  });
+}
 
+
+export function getSessionSnapshot() {
+  return {
+    session: cachedSession,
+    user: cachedUser,
+    updatedAt: sessionUpdatedAt,
+  };
+}
+
+export function getCachedUser() {
+  return cachedUser;
+}
+
+export function getCachedSession() {
+  return cachedSession;
+}
+
+// 兼容性别名
+export async function getAccessToken(options = {}) {
+  const session = await ensureFreshSession(options);
+  return session?.access_token || null;
+}

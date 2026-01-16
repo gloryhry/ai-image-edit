@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { supabase, onConnectionRecovery } from '../lib/supabase';
+import { supabase, ensureFreshSession, onConnectionRecovery, getSessionSnapshot } from '../lib/supabase';
+import { withSessionRefresh } from '../lib/supabase-request';
 
 const AuthContext = createContext({});
 
@@ -12,19 +13,21 @@ export const useAuth = () => {
 };
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => getSessionSnapshot().user);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const fetchProfile = useCallback(async (userId) => {
     if (!userId) return null;
-    
+
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
+      const { data, error } = await withSessionRefresh(() => (
+        supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .single()
+      ));
 
       if (error) throw error;
       setProfile(data);
@@ -35,48 +38,54 @@ export const AuthProvider = ({ children }) => {
     }
   }, []);
 
+  const applySession = useCallback(async (session) => {
+    const nextUser = session?.user ?? null;
+    setUser(nextUser);
+
+    if (nextUser) {
+      await fetchProfile(nextUser.id);
+    } else {
+      setProfile(null);
+    }
+  }, [fetchProfile]);
+
   // 刷新当前用户状态和数据
   const refreshAuthState = useCallback(async () => {
     console.log('[AuthContext] Refreshing auth state...');
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const currentUser = session?.user ?? null;
-      setUser(currentUser);
-      
-      if (currentUser) {
-        await fetchProfile(currentUser.id);
-      } else {
-        setProfile(null);
-      }
-      
-      console.log('[AuthContext] Auth state refreshed, user:', currentUser?.id ?? 'none');
+      const session = await ensureFreshSession({ timeoutMs: 6000 });
+      const fallbackSession = session || getSessionSnapshot().session;
+      await applySession(fallbackSession);
+      console.log('[AuthContext] Auth state refreshed, user:', fallbackSession?.user?.id ?? 'none');
     } catch (error) {
       console.error('[AuthContext] Error refreshing auth state:', error);
     }
-  }, [fetchProfile]);
+  }, [applySession]);
 
   useEffect(() => {
     let subscription = null;
 
     const initAuth = async () => {
-      // 获取当前 Session
-      const { data: { session } } = await supabase.auth.getSession();
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
+      const snapshot = getSessionSnapshot();
+      if (snapshot.user) {
+        setUser(snapshot.user);
       }
+
+      try {
+        const session = await ensureFreshSession({ timeoutMs: 6000 });
+        await applySession(session || snapshot.session);
+      } catch (error) {
+        console.error('[AuthContext] Initial auth check failed:', error);
+        await applySession(snapshot.session);
+      }
+
       setLoading(false);
 
       // 设置监听器
       const { data } = supabase.auth.onAuthStateChange(
         async (event, session) => {
           console.log('[AuthContext] Auth state changed:', event);
-          setUser(session?.user ?? null);
-          if (session?.user) {
-            await fetchProfile(session.user.id);
-          } else {
-            setProfile(null);
-          }
+          await applySession(session);
           setLoading(false);
         }
       );
@@ -103,7 +112,7 @@ export const AuthProvider = ({ children }) => {
       unsubscribeRecovery();
       window.removeEventListener('supabase:recovered', handleRecovered);
     };
-  }, [fetchProfile, refreshAuthState]);
+  }, [applySession, refreshAuthState]);
 
   const signInWithEmail = async (email, password) => {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -158,7 +167,7 @@ export const AuthProvider = ({ children }) => {
     signInWithGitHub,
     signOut,
     refreshProfile,
-    refreshAuthState, // 暴露刷新方法，供外部调用
+    refreshAuthState,
   };
 
   return (

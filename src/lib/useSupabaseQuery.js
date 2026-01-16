@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { withSessionRefresh } from './supabase-request';
-import { onConnectionRecovery } from './supabase';
+import { onConnectionRecovery, ensureFreshSession } from './supabase';
 
 /**
  * 自定义 Hook：安全地执行 Supabase 查询
@@ -53,6 +53,7 @@ export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) 
         setError(null);
 
         try {
+            await ensureFreshSession({ timeoutMs: 5000 });
             const { data: result, error: fetchError } = await withSessionRefresh(queryBuilder);
 
             if (!mountedRef.current) {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { supabase, ensureFreshSession } from '../lib/supabase';
 import { Button } from '../components/ui/Button';
 
 export const ResetPasswordPage = () => {
@@ -18,7 +18,7 @@ export const ResetPasswordPage = () => {
 
   useEffect(() => {
     const checkSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = await ensureFreshSession({ timeoutMs: 6000 });
       setHasValidSession(!!session);
     };
     checkSession();

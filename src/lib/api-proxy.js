@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { getAccessToken } from './supabase';
 
 /**
  * 通过服务器代理调用 AI 图像生成/编辑 API
@@ -7,65 +7,6 @@ import { supabase } from './supabase';
 
 // API 服务器地址，开发时可以通过环境变量配置
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
-
-/**
- * 带超时的 Promise 包装
- */
-function withTimeout(promise, ms, errorMessage = '操作超时') {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(errorMessage)), ms)),
-  ]);
-}
-
-/**
- * 获取当前用户的 access token
- * 如果 token 即将过期，会自动刷新
- * 带超时保护，防止 getSession 卡住
- */
-async function getAccessToken() {
-  try {
-    const { data: { session } } = await withTimeout(
-      supabase.auth.getSession(),
-      5000,
-      'getSession 超时'
-    );
-    
-    if (!session) {
-      return null;
-    }
-    
-    // 检查 token 是否即将过期（剩余时间 < 60 秒）
-    const expiresAt = session.expires_at;
-    const now = Math.floor(Date.now() / 1000);
-    if (expiresAt && expiresAt - now < 60) {
-      const { data, error } = await withTimeout(
-        supabase.auth.refreshSession(),
-        5000,
-        'refreshSession 超时'
-      );
-      if (!error && data.session) {
-        return data.session.access_token;
-      }
-    }
-    
-    return session.access_token;
-  } catch (e) {
-    console.error('getAccessToken 失败:', e);
-    // 如果超时，尝试从 localStorage 直接读取（降级方案）
-    try {
-      const stored = localStorage.getItem('ai-image-edit-auth');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return parsed?.access_token;
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  }
-}
-
 /**
  * 生成图片
  * @param {Object} params
