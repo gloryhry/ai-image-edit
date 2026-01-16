@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { supabase, ensureFreshSession, onConnectionRecovery, getSessionSnapshot } from '../lib/supabase';
 import { withSessionRefresh } from '../lib/supabase-request';
 
@@ -16,6 +16,7 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(() => getSessionSnapshot().user);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const refreshInFlightRef = useRef(null);
 
   const fetchProfile = useCallback(async (userId) => {
     if (!userId) return null;
@@ -27,7 +28,7 @@ export const AuthProvider = ({ children }) => {
           .select('*')
           .eq('id', userId)
           .single()
-      ));
+      ), { timeoutMs: 8000 });
 
       if (error) throw error;
       setProfile(data);
@@ -51,15 +52,25 @@ export const AuthProvider = ({ children }) => {
 
   // 刷新当前用户状态和数据
   const refreshAuthState = useCallback(async () => {
-    console.log('[AuthContext] Refreshing auth state...');
-    try {
-      const session = await ensureFreshSession({ timeoutMs: 6000 });
-      const fallbackSession = session || getSessionSnapshot().session;
-      await applySession(fallbackSession);
-      console.log('[AuthContext] Auth state refreshed, user:', fallbackSession?.user?.id ?? 'none');
-    } catch (error) {
-      console.error('[AuthContext] Error refreshing auth state:', error);
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
+
+    console.log('[AuthContext] Refreshing auth state...');
+    refreshInFlightRef.current = (async () => {
+      try {
+        const session = await ensureFreshSession({ timeoutMs: 6000 });
+        const fallbackSession = session || getSessionSnapshot().session;
+        await applySession(fallbackSession);
+        console.log('[AuthContext] Auth state refreshed, user:', fallbackSession?.user?.id ?? 'none');
+      } catch (error) {
+        console.error('[AuthContext] Error refreshing auth state:', error);
+      }
+    })().finally(() => {
+      refreshInFlightRef.current = null;
+    });
+
+    return refreshInFlightRef.current;
   }, [applySession]);
 
   useEffect(() => {
@@ -100,17 +111,9 @@ export const AuthProvider = ({ children }) => {
       refreshAuthState();
     });
 
-    // 监听 supabase:recovered 事件作为备用
-    const handleRecovered = () => {
-      console.log('[AuthContext] Received supabase:recovered event');
-      refreshAuthState();
-    };
-    window.addEventListener('supabase:recovered', handleRecovered);
-
     return () => {
       if (subscription) subscription.unsubscribe();
       unsubscribeRecovery();
-      window.removeEventListener('supabase:recovered', handleRecovered);
     };
   }, [applySession, refreshAuthState]);
 

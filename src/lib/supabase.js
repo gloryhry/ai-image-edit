@@ -10,7 +10,9 @@ if (!supabaseUrl || !supabaseAnonKey) {
 // 注意：认证相关的请求使用更长的超时，因为可能涉及复杂的验证流程
 // 数据库查询超时由 supabase-request.js 中的 withTimeout 控制
 const FETCH_TIMEOUT_MS = 60000; // 60秒，给 auth API 足够的响应时间
-const CONNECTION_TEST_TIMEOUT_MS = 30000; // 连接测试超时：30秒（页面冻结期间需要更长时间）
+// 连接测试用于恢复流程中的“快速探测”，超时过长会直接拉长用户可用时间
+const CONNECTION_TEST_TIMEOUT_MS = 5000; // 快速探测：5 秒
+const CONNECTION_TEST_TIMEOUT_LONG_MS = 15000; // 兜底：15 秒（长时间冻结/休眠后）
 const SESSION_REFRESH_TIMEOUT_MS = 8000;
 const SESSION_EXPIRY_BUFFER_SECONDS = 60;
 
@@ -73,11 +75,25 @@ const activeAbortControllers = new Set(); // 追踪所有活跃的 AbortControll
 let lastRecoveryTime = 0; // 上次恢复时间
 const MIN_RECOVERY_INTERVAL = 3000; // 最小恢复间隔 3 秒
 let recoveryCooldown = false; // 恢复冷却期
-let lastHiddenTime = 0; // 页面最后隐藏时间，供 recoverConnection 使用
+let lastHiddenTime = Date.now(); // 页面最后隐藏时间，供 recoverConnection 使用
 let cachedSession = null;
 let cachedUser = null;
 let sessionUpdatedAt = 0;
 let sessionRefreshPromise = null;
+let recoveryInFlightPromise = null;
+
+export async function waitForConnectionRecovery(options = {}) {
+  const { timeoutMs = 5000 } = options;
+  if (!recoveryInFlightPromise) {
+    return true;
+  }
+  try {
+    await withTimeout(recoveryInFlightPromise, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function createSupabaseClient() {
   clientVersion++;
@@ -91,6 +107,11 @@ function createSupabaseClient() {
       storageKey: 'ai-image-edit-auth',
       flowType: 'pkce',
       storage: createCookieStorage(),
+    },
+    // 默认心跳 25s；冻结/休眠恢复时可能要等到下一次心跳才触发断线重连
+    // 适当缩短心跳间隔可更快发现断线并进入重连流程
+    realtime: {
+      heartbeatIntervalMs: 15000,
     },
     global: {
       fetch: createFetchWithAbortable(),
@@ -180,9 +201,10 @@ export const supabase = new Proxy({}, {
 // ============================================
 // 连接健康检查 - 绕过 SDK 使用原生 fetch
 // ============================================
-async function testConnectionHealth() {
+async function testConnectionHealth(options = {}) {
+  const { timeoutMs = CONNECTION_TEST_TIMEOUT_MS } = options;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), CONNECTION_TEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     // 使用原生 fetch 直接测试 REST API 可达性
@@ -248,6 +270,10 @@ async function withTimeout(promise, timeoutMs) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function isSessionExpiring(session) {
@@ -351,13 +377,22 @@ export async function ensureFreshSession(options = {}) {
 // ============================================
 export async function reconnectRealtime() {
   try {
-    const channels = supabaseInstance.getChannels();
+    const realtime = supabaseInstance?.realtime;
+    if (!realtime || typeof realtime.disconnect !== 'function' || typeof realtime.connect !== 'function') {
+      return;
+    }
+
+    const channels = typeof supabaseInstance.getChannels === 'function'
+      ? supabaseInstance.getChannels()
+      : [];
 
     if (channels.length === 0) {
       return;
     }
 
-    await supabaseInstance.removeAllChannels();
+    // 直接重置底层 WebSocket，避免移除 channel 造成订阅丢失
+    await Promise.resolve(realtime.disconnect());
+    await Promise.resolve(realtime.connect());
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('supabase:reconnect', {
@@ -417,8 +452,13 @@ export async function recoverConnection(options = {}) {
 
   // 防止重复触发恢复流程
   if (isRecoveryInProgress && !force) {
-    console.log('[Supabase] Recovery already in progress, skipping...');
-    return { success: false, skipped: true };
+    console.log('[Supabase] Recovery already in progress, waiting...');
+    try {
+      await recoveryInFlightPromise;
+      return { success: true, waited: true };
+    } catch (e) {
+      return { success: false, error: e, waited: true };
+    }
   }
 
   isRecoveryInProgress = true;
@@ -426,7 +466,7 @@ export async function recoverConnection(options = {}) {
   const hiddenDuration = Date.now() - lastHiddenTime;
   console.log('[Supabase] Starting connection recovery...', { quickCheck, force, hiddenDuration });
 
-  try {
+  recoveryInFlightPromise = (async () => {
     // 0. 清除活跃请求列表（页面冻结期间这些请求可能已失效）
     // 不再中止它们，因为浏览器已经处理了这些请求
     const pendingCount = activeAbortControllers.size;
@@ -435,56 +475,55 @@ export async function recoverConnection(options = {}) {
       activeAbortControllers.clear();
     }
 
-    // 1. 等待 SDK 自动恢复
-    // 浏览器冻结页面后，需要更长时间让 JavaScript 运行时和 SDK 内部状态恢复
-    // 页面长时间隐藏后需要更长的恢复时间
-    const recoveryWaitTime = hiddenDuration > 60000 ? 10000 : (hiddenDuration > 30000 ? 5000 : 3000);
-    console.log(`[Supabase] Hidden for ${hiddenDuration}ms, waiting ${recoveryWaitTime}ms for SDK recovery...`);
-    await new Promise(resolve => setTimeout(resolve, recoveryWaitTime));
-
-    // 2. 测试 API 连通性（使用原生 fetch，绕过可能冻结的 SDK）
-    const apiReachable = await testConnectionHealth();
-    console.log('[Supabase] API reachable:', apiReachable ? 'YES' : 'NO');
-
-    // 3. 如果 API 不可达，等待更长时间
-    if (!apiReachable) {
-      console.log('[Supabase] API not reachable, waiting longer for network recovery...');
-      await new Promise(resolve => setTimeout(resolve, 5000));
+    // 1. 先走“乐观快路径”：立即尝试探测连通性/刷新 Session
+    // 过去的固定等待会直接拉长“恢复可用”的时间；改为失败再退避等待
+    const settleMs = quickCheck ? 0 : (hiddenDuration > 30000 ? 200 : 0);
+    if (settleMs > 0) {
+      console.log(`[Supabase] Long hidden (${hiddenDuration}ms), settling ${settleMs}ms before recovery...`);
+      await sleep(settleMs);
     }
 
-    // 4. 尝试刷新 Session（快速模式下跳过）
+    // 2. 测试 API 连通性（使用原生 fetch，绕过可能冻结的 SDK）
+    // 先用短超时快速判断，失败再用更长超时兜底，避免卡住恢复流程
+    const apiTimeoutMs = quickCheck ? 1500 : 3000;
+    let apiReachable = await testConnectionHealth({ timeoutMs: apiTimeoutMs });
+    if (!apiReachable && !quickCheck) {
+      console.log('[Supabase] API not reachable (fast check), retrying with longer timeout...');
+      await sleep(1000);
+      apiReachable = await testConnectionHealth({ timeoutMs: CONNECTION_TEST_TIMEOUT_LONG_MS });
+    }
+    console.log('[Supabase] API reachable:', apiReachable ? 'YES' : 'NO');
+
+    // 3. 尝试刷新 Session（快速模式下跳过）
     let session = null;
     if (!quickCheck) {
-      let retryCount = 0;
-      const maxRetries = hiddenDuration > 60000 ? 3 : 2;
+      // 第一轮：短超时，优先让用户尽快恢复可用
+      try {
+        const fastTimeoutMs = Math.min(2500, SESSION_REFRESH_TIMEOUT_MS);
+        console.log(`[Supabase] Session refresh attempt 1/2 (timeout ${fastTimeoutMs}ms)...`);
+        session = await ensureFreshSession({ timeoutMs: fastTimeoutMs, force: false });
+      } catch (e) {
+        console.warn('[Supabase] Session refresh attempt 1 failed:', e.message);
+      }
 
-      while (retryCount < maxRetries) {
+      // 第二轮：兜底，给 SDK/网络更多恢复空间
+      if (!session) {
         try {
-          console.log(`[Supabase] Session refresh attempt ${retryCount + 1}/${maxRetries}...`);
-          session = await ensureFreshSession({ timeoutMs: SESSION_REFRESH_TIMEOUT_MS, force: retryCount > 0 });
-          if (session) {
-            console.log('[Supabase] Session status: valid');
-            break;
-          }
+          console.log(`[Supabase] Session refresh attempt 2/2 (timeout ${SESSION_REFRESH_TIMEOUT_MS}ms)...`);
+          session = await ensureFreshSession({ timeoutMs: SESSION_REFRESH_TIMEOUT_MS, force: true });
         } catch (e) {
-          console.warn(`[Supabase] Session refresh attempt ${retryCount + 1} failed:`, e.message);
-        }
-
-        retryCount++;
-        if (retryCount < maxRetries) {
-          // 等待更长时间让 SDK 完全恢复
-          const waitTime = hiddenDuration > 60000 ? 3000 : 2000;
-          console.log(`[Supabase] Waiting ${waitTime}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
+          console.warn('[Supabase] Session refresh attempt 2 failed:', e.message);
         }
       }
 
       if (!session) {
         console.log('[Supabase] Session status: none (after all retries)');
+      } else {
+        console.log('[Supabase] Session status: valid');
       }
     }
 
-    // 5. 重连 Realtime（快速模式下跳过）
+    // 4. 重连 Realtime（快速模式下跳过）
     if (!quickCheck) {
       try {
         await reconnectRealtime();
@@ -493,7 +532,7 @@ export async function recoverConnection(options = {}) {
       }
     }
 
-    // 6. 触发恢复事件
+    // 5. 触发恢复事件
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('supabase:recovered', {
         detail: {
@@ -505,17 +544,21 @@ export async function recoverConnection(options = {}) {
       }));
     }
 
-    // 7. 执行回调
+    // 6. 执行回调
     executeRecoveryCallbacks();
 
     console.log('[Supabase] Connection recovery completed, client version:', clientVersion);
     return { success: true, session, quickCheck };
+  })();
+
+  try {
+    return await recoveryInFlightPromise;
   } catch (e) {
     console.error('[Supabase] Connection recovery error:', e);
-
     // 即使出错也不再重建客户端
     return { success: false, error: e };
   } finally {
+    recoveryInFlightPromise = null;
     // 确保恢复锁被释放
     isRecoveryInProgress = false;
   }
@@ -552,9 +595,6 @@ if (typeof document !== 'undefined') {
         // 短时间切换（<3秒）使用快速检查，长时间切换使用完整检查
         const quickCheck = hiddenDuration < 3000;
         await recoverConnection({ quickCheck });
-        if (!quickCheck) {
-          await ensureFreshSession({ timeoutMs: SESSION_REFRESH_TIMEOUT_MS });
-        }
       }, 100);
     }
   });
@@ -563,6 +603,43 @@ if (typeof document !== 'undefined') {
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
     console.log('[Supabase] Network back online, running recovery...');
+    recoverConnection({ quickCheck: false });
+  });
+
+  // BFCache 恢复时（Safari/移动端常见），visibilitychange 不一定可靠
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+      console.log('[Supabase] Page restored from bfcache, running recovery...');
+      recoverConnection({ quickCheck: false, force: true });
+    }
+  });
+
+  // 通过计时漂移检测“冻结/休眠后恢复但页面仍可见”的情况
+  // 例如：电脑休眠、手机锁屏后回来，visibilityState 仍然是 visible
+  let lastTickAt = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastTickAt;
+    lastTickAt = now;
+
+    // 15s 以上的 gap 基本可以认为发生了冻结/休眠/严重节流
+    if (gap > 15000) {
+      console.log('[Supabase] Detected timer drift (possible freeze/resume), running recovery...', { gap });
+      // 让“不可用时长”推断更贴近真实冻结时长（仅用于日志/轻量策略）
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        lastHiddenTime = now - gap;
+      }
+      recoverConnection({ quickCheck: false, force: true });
+    }
+  }, 5000);
+
+  // focus 更容易在“恢复到前台”时触发，作为更快的补充触发点
+  window.addEventListener('focus', () => {
+    const sinceLastRecovery = Date.now() - lastRecoveryTime;
+    if (sinceLastRecovery < MIN_RECOVERY_INTERVAL) {
+      return;
+    }
+    console.log('[Supabase] Window focused, running recovery...');
     recoverConnection({ quickCheck: false });
   });
 }

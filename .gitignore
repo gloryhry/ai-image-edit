@@ -25,4 +25,5 @@ dist-ssr
 
 .spec-workflow/
 .env
+.serena/
 AGENTS.md

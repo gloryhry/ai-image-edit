@@ -25,6 +25,19 @@ async function fetchWithTimeout(url, options, timeoutMs = API_TIMEOUT_MS) {
   }
 }
 
+async function readApiErrorMessage(response) {
+  const text = await response.text().catch(() => '');
+  try {
+    const json = JSON.parse(text || '{}');
+    if (typeof json?.error?.message === 'string') return json.error.message;
+    if (typeof json?.message === 'string') return json.message;
+    if (typeof json?.error === 'string') return json.error;
+    return text || null;
+  } catch {
+    return text || null;
+  }
+}
+
 // Helper: base64 to Blob
 function base64ToBlob(base64, mimeType = 'image/png') {
   const bytes = Buffer.from(base64, 'base64');
@@ -58,8 +71,8 @@ async function generateImageOpenAI({ prompt, aspectRatio, size, model }, setting
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `生成失败: ${response.status}`);
+    const message = await readApiErrorMessage(response);
+    throw new Error(`${message || '生成失败'} (status: ${response.status})`);
   }
 
   const data = await response.json();
@@ -84,7 +97,7 @@ async function editImageOpenAI({ imageBase64, imageMimeType, maskBase64, prompt,
   const maskBlob = base64ToBlob(maskBase64, 'image/png');
 
   formData.append('image', imageBlob, 'image.png');
-  formData.append('image', maskBlob, 'mask.png');
+  formData.append('mask', maskBlob, 'mask.png');
   formData.append('response_format', 'b64_json');
 
   const response = await fetchWithTimeout(url, {
@@ -96,8 +109,8 @@ async function editImageOpenAI({ imageBase64, imageMimeType, maskBase64, prompt,
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `编辑失败: ${response.status}`);
+    const message = await readApiErrorMessage(response);
+    throw new Error(`${message || '编辑失败'} (status: ${response.status})`);
   }
 
   const data = await response.json();
@@ -155,8 +168,8 @@ async function generateImageGemini({ prompt, model, aspectRatio, size }, setting
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `生成失败: ${response.status}`);
+    const message = await readApiErrorMessage(response);
+    throw new Error(`${message || '生成失败'} (status: ${response.status})`);
   }
 
   const data = await response.json();
@@ -205,8 +218,8 @@ async function editImageGemini({ imageBase64, imageMimeType, maskBase64, prompt,
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `编辑失败: ${response.status}`);
+    const message = await readApiErrorMessage(response);
+    throw new Error(`${message || '编辑失败'} (status: ${response.status})`);
   }
 
   const data = await response.json();
@@ -233,8 +246,8 @@ async function generateImageViaChatCompletions({ prompt, model }, settings) {
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `生成失败: ${response.status}`);
+    const message = await readApiErrorMessage(response);
+    throw new Error(`${message || '生成失败'} (status: ${response.status})`);
   }
 
   const data = await response.json();

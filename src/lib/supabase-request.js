@@ -1,7 +1,18 @@
-import { supabase, ensureFreshSession } from './supabase';
+import { supabase, ensureFreshSession, recoverConnection, waitForConnectionRecovery } from './supabase';
 
-// 超时包装器，使用 AbortController 确保可以中断
-function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') {
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function attachAbortSignalIfSupported(query, signal) {
+    if (query && typeof query.abortSignal === 'function') {
+        return query.abortSignal(signal);
+    }
+    return query;
+}
+
+// 超时包装器：尽可能将 AbortSignal 注入到 Postgrest 查询中，避免“僵尸请求”占用连接池
+function withTimeoutQuery(queryFn, timeoutMs = 30000, errorMessage = '请求超时') {
     const controller = new AbortController();
     let timeoutId;
 
@@ -13,7 +24,10 @@ function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') 
     });
 
     return {
-        promise: Promise.race([promise, timeoutPromise]).finally(() => {
+        promise: Promise.race([
+            Promise.resolve(attachAbortSignalIfSupported(queryFn({ signal: controller.signal }), controller.signal)),
+            timeoutPromise,
+        ]).finally(() => {
             clearTimeout(timeoutId);
         }),
         abort: () => controller.abort(),
@@ -31,11 +45,14 @@ function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') 
  */
 export async function withSessionRefresh(queryFn, { timeoutMs = 20000, refreshOnStart = true } = {}) {
     try {
+        // 如果正在执行恢复流程，先等它跑完，避免在恢复中发起查询导致长时间悬挂
+        await waitForConnectionRecovery({ timeoutMs: 5000 });
+
         if (refreshOnStart) {
-            await ensureFreshSession({ timeoutMs: 5000 });
+            await ensureFreshSession({ timeoutMs: 2500 });
         }
         // 使用 withTimeout 包装查询
-        const { promise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+        const { promise } = withTimeoutQuery(queryFn, timeoutMs, '查询超时');
         const result = await promise;
         const { data, error } = result;
 
@@ -48,7 +65,7 @@ export async function withSessionRefresh(queryFn, { timeoutMs = 20000, refreshOn
             console.log('[SupabaseRequest] Auth error, refreshing session...');
             await ensureFreshSession({ timeoutMs: 5000, force: true });
             // 刷新 session 后重试一次
-            const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+            const { promise: retryPromise } = withTimeoutQuery(queryFn, timeoutMs, '查询超时');
             return retryPromise;
         }
 
@@ -58,13 +75,15 @@ export async function withSessionRefresh(queryFn, { timeoutMs = 20000, refreshOn
         // 超时或 AbortError - SDK 可能被冻结
         if (e.message === '查询超时' || e.name === 'AbortError' || e.message?.includes('aborted')) {
             console.log('[SupabaseRequest] Request aborted/timeout, waiting for SDK/JS recovery...');
-            // 等待 SDK 和 JavaScript 运行时恢复（浏览器冻结后需要更长时间）
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // 主动触发恢复流程；比固定 sleep 更快更可控
+            await recoverConnection({ force: true, quickCheck: false });
             await ensureFreshSession({ timeoutMs: 5000 });
 
             // 重试一次
             try {
-                const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+                // 恢复后通常应快速返回，避免再次卡住太久
+                const retryTimeoutMs = Math.min(timeoutMs, 12000);
+                const { promise: retryPromise } = withTimeoutQuery(queryFn, retryTimeoutMs, '查询超时');
                 const result = await retryPromise;
                 return result;
             } catch (retryError) {
@@ -76,11 +95,13 @@ export async function withSessionRefresh(queryFn, { timeoutMs = 20000, refreshOn
         // 网络错误 - 等待后重试
         if (isNetworkError(e)) {
             console.log('[SupabaseRequest] Network error, waiting and retrying...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            await sleep(1000);
+            await recoverConnection({ force: true, quickCheck: false });
             await ensureFreshSession({ timeoutMs: 5000 });
 
             try {
-                const { promise: retryPromise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+                const retryTimeoutMs = Math.min(timeoutMs, 12000);
+                const { promise: retryPromise } = withTimeoutQuery(queryFn, retryTimeoutMs, '查询超时');
                 const result = await retryPromise;
                 return result;
             } catch (retryError) {
