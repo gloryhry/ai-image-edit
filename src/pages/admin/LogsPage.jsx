@@ -126,17 +126,14 @@ export const LogsPage = () => {
         const hiddenDuration = Date.now() - lastHiddenTime;
         console.log('[LogsPage] Page became visible after', hiddenDuration, 'ms');
 
-        // 只有后台超过 10 秒才需要刷新（与 supabase.js 的重建阈值一致）
-        if (hiddenDuration > 10000) {
-          console.log('[LogsPage] Long idle, scheduling refresh...');
-          // 等待 1.5 秒，确保 Supabase 客户端已经重建完成
-          setTimeout(() => {
-            if (!authLoading) {
-              console.log('[LogsPage] Refreshing data after visibility change');
-              fetchLogs(true); // force refresh
-            }
-          }, 1500);
-        }
+        // Supabase 客户端会在 visibilitychange 时自动恢复连接
+        // 等待 500ms 让恢复流程完成，然后刷新数据
+        setTimeout(() => {
+          if (!authLoading && mountedRef.current) {
+            console.log('[LogsPage] Refreshing data after visibility change');
+            fetchLogs(true); // force refresh
+          }
+        }, 500);
       }
     };
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { withSessionRefresh } from './supabase-request';
-import { supabase, markRequestSuccess, isClientPossiblyUnhealthy } from './supabase';
+import { onConnectionRecovery } from './supabase';
 
 /**
  * 自定义 Hook：安全地执行 Supabase 查询
@@ -9,7 +9,7 @@ import { supabase, markRequestSuccess, isClientPossiblyUnhealthy } from './supab
  * 特性：
  * 1. 等待认证完成后再发起请求
  * 2. 防止重复请求
- * 3. 页面从后台恢复时自动刷新数据
+ * 3. 页面从后台恢复时自动刷新数据（监听 supabase:recovered 事件）
  * 4. 自动处理错误和加载状态
  * 
  * @param {Function} queryBuilder - 返回 Supabase 查询的函数
@@ -19,9 +19,9 @@ import { supabase, markRequestSuccess, isClientPossiblyUnhealthy } from './supab
  */
 export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) {
     const {
-        enabled = true,  // 是否启用查询
-        refreshOnVisibility = true,  // 页面恢复可见时是否刷新
-        skipAuthCheck = false,  // 是否跳过认证检查
+        enabled = true,
+        refreshOnRecovery = true,  // 连接恢复时是否刷新
+        skipAuthCheck = false,
     } = options;
 
     const { loading: authLoading } = useAuth();
@@ -33,36 +33,21 @@ export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) 
     const fetchingRef = useRef(false);
     const needsRefreshRef = useRef(false);
     const mountedRef = useRef(true);
-    const lastVisibleTimeRef = useRef(Date.now());
 
     const fetchData = useCallback(async (force = false) => {
-        // 防止重复请求
         if (fetchingRef.current && !force) {
-            console.log('[useSupabaseQuery] Skipped - already fetching');
             return;
         }
 
-        // 检查是否启用
         if (!enabled) {
-            console.log('[useSupabaseQuery] Skipped - not enabled');
             return;
         }
 
-        // 检查认证状态
         if (!skipAuthCheck && authLoading) {
-            console.log('[useSupabaseQuery] Skipped - auth loading');
             needsRefreshRef.current = true;
             return;
         }
 
-        // 检查客户端健康状态
-        if (isClientPossiblyUnhealthy()) {
-            console.log('[useSupabaseQuery] Client unhealthy, waiting...');
-            await new Promise(resolve => setTimeout(resolve, 500));
-            markRequestSuccess();
-        }
-
-        console.log('[useSupabaseQuery] Starting fetch...');
         fetchingRef.current = true;
         setLoading(true);
         setError(null);
@@ -71,19 +56,16 @@ export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) 
             const { data: result, error: fetchError } = await withSessionRefresh(queryBuilder);
 
             if (!mountedRef.current) {
-                console.log('[useSupabaseQuery] Component unmounted, discarding result');
                 return;
             }
 
             if (fetchError) {
-                console.error('[useSupabaseQuery] Error:', fetchError);
                 setError(fetchError.message || '加载失败');
             } else {
                 setData(result);
                 setError(null);
             }
         } catch (e) {
-            console.error('[useSupabaseQuery] Exception:', e);
             if (mountedRef.current) {
                 setError(e.message || '加载失败');
             }
@@ -96,7 +78,7 @@ export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) 
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [queryBuilder, enabled, skipAuthCheck, authLoading, ...dependencies]);
 
-    // 主要的数据获取 effect
+    // 初始数据获取
     useEffect(() => {
         if (!authLoading && enabled) {
             fetchData();
@@ -106,40 +88,28 @@ export function useSupabaseQuery(queryBuilder, dependencies = [], options = {}) 
     // 认证完成后检查是否需要刷新
     useEffect(() => {
         if (!authLoading && needsRefreshRef.current) {
-            console.log('[useSupabaseQuery] Auth completed, triggering fetch');
             needsRefreshRef.current = false;
             fetchData();
         }
     }, [authLoading, fetchData]);
 
-    // 页面可见性变化处理
+    // 连接恢复时自动刷新数据
     useEffect(() => {
-        if (!refreshOnVisibility) return;
+        if (!refreshOnRecovery) return;
 
-        const handleVisibilityChange = () => {
-            if (document.visibilityState === 'visible') {
-                const hiddenDuration = Date.now() - lastVisibleTimeRef.current;
-                console.log(`[useSupabaseQuery] Page visible after ${hiddenDuration}ms`);
-
-                // 如果隐藏时间超过 5 秒，刷新数据
-                if (hiddenDuration > 5000) {
-                    setTimeout(() => {
-                        if (!authLoading && mountedRef.current) {
-                            console.log('[useSupabaseQuery] Refreshing after visibility change');
-                            fetchData(true);
-                        }
-                    }, 300);
-                }
-            } else {
-                lastVisibleTimeRef.current = Date.now();
+        // 使用 onConnectionRecovery 注册回调
+        const unsubscribe = onConnectionRecovery(() => {
+            console.log('[useSupabaseQuery] Connection recovered, refreshing data...');
+            if (!authLoading && mountedRef.current) {
+                // 延迟一点执行，确保 session 已刷新
+                setTimeout(() => {
+                    fetchData(true);
+                }, 100);
             }
-        };
+        });
 
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-        return () => {
-            document.removeEventListener('visibilitychange', handleVisibilityChange);
-        };
-    }, [refreshOnVisibility, authLoading, fetchData]);
+        return unsubscribe;
+    }, [refreshOnRecovery, authLoading, fetchData]);
 
     // 组件卸载处理
     useEffect(() => {
@@ -168,7 +138,6 @@ export async function safeSupabaseQuery(queryBuilder) {
         }
         return { data, error: null };
     } catch (e) {
-        console.error('[safeSupabaseQuery] Error:', e);
         return { data: null, error: e };
     }
 }

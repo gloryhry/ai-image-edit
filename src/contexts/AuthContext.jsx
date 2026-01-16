@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { supabase, onConnectionRecovery } from '../lib/supabase';
 
 const AuthContext = createContext({});
 
@@ -16,7 +16,9 @@ export const AuthProvider = ({ children }) => {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchProfile = async (userId) => {
+  const fetchProfile = useCallback(async (userId) => {
+    if (!userId) return null;
+    
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -31,7 +33,27 @@ export const AuthProvider = ({ children }) => {
       console.error('Error fetching profile:', error);
       return null;
     }
-  };
+  }, []);
+
+  // 刷新当前用户状态和数据
+  const refreshAuthState = useCallback(async () => {
+    console.log('[AuthContext] Refreshing auth state...');
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const currentUser = session?.user ?? null;
+      setUser(currentUser);
+      
+      if (currentUser) {
+        await fetchProfile(currentUser.id);
+      } else {
+        setProfile(null);
+      }
+      
+      console.log('[AuthContext] Auth state refreshed, user:', currentUser?.id ?? 'none');
+    } catch (error) {
+      console.error('[AuthContext] Error refreshing auth state:', error);
+    }
+  }, [fetchProfile]);
 
   useEffect(() => {
     let subscription = null;
@@ -48,6 +70,7 @@ export const AuthProvider = ({ children }) => {
       // 设置监听器
       const { data } = supabase.auth.onAuthStateChange(
         async (event, session) => {
+          console.log('[AuthContext] Auth state changed:', event);
           setUser(session?.user ?? null);
           if (session?.user) {
             await fetchProfile(session.user.id);
@@ -60,39 +83,27 @@ export const AuthProvider = ({ children }) => {
       subscription = data.subscription;
     };
 
-    // 初始化
     initAuth();
 
-    // 防抖：记录上次初始化时间
-    let lastInitTime = 0;
-    const MIN_INIT_INTERVAL = 3000; // 最小初始化间隔 3 秒
+    // 注册连接恢复回调 - 浏览器冻结恢复后重新拉取数据
+    const unsubscribeRecovery = onConnectionRecovery(() => {
+      console.log('[AuthContext] Connection recovered, refreshing auth state...');
+      refreshAuthState();
+    });
 
-    // 监听客户端重建事件
-    const handleClientRecreated = () => {
-      const now = Date.now();
-      if (now - lastInitTime < MIN_INIT_INTERVAL) {
-        console.log('[AuthContext] Skipping re-init, too soon after last init');
-        return;
-      }
-      lastInitTime = now;
-
-      console.log('[AuthContext] Client recreated, re-subscribing...');
-      if (subscription) {
-        subscription.unsubscribe();
-      }
-      // 使用 setTimeout 延迟初始化，让其他操作有机会完成
-      setTimeout(() => {
-        initAuth();
-      }, 500);
+    // 监听 supabase:recovered 事件作为备用
+    const handleRecovered = () => {
+      console.log('[AuthContext] Received supabase:recovered event');
+      refreshAuthState();
     };
-
-    window.addEventListener('supabase:client-recreated', handleClientRecreated);
+    window.addEventListener('supabase:recovered', handleRecovered);
 
     return () => {
       if (subscription) subscription.unsubscribe();
-      window.removeEventListener('supabase:client-recreated', handleClientRecreated);
+      unsubscribeRecovery();
+      window.removeEventListener('supabase:recovered', handleRecovered);
     };
-  }, []);
+  }, [fetchProfile, refreshAuthState]);
 
   const signInWithEmail = async (email, password) => {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -147,6 +158,7 @@ export const AuthProvider = ({ children }) => {
     signInWithGitHub,
     signOut,
     refreshProfile,
+    refreshAuthState, // 暴露刷新方法，供外部调用
   };
 
   return (

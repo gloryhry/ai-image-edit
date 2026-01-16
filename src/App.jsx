@@ -1,11 +1,11 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Download, Image as ImageIcon, ImageOff, Upload } from 'lucide-react';
 import { CanvasEditor } from './components/CanvasEditor';
 import { ControlPanel } from './components/ControlPanel';
 import { Layout } from './components/Layout';
 import { Button } from './components/ui/Button';
 import { generateImage, editImage } from './lib/api-proxy';
-import { supabase } from './lib/supabase';
+import { supabase, onConnectionRecovery } from './lib/supabase';
 import { useAuth } from './contexts/AuthContext';
 
 function App() {
@@ -21,26 +21,36 @@ function App() {
   const [models, setModels] = useState([]);
   const [selectedModelId, setSelectedModelId] = useState(() => localStorage.getItem('selectedModelId') || '');
 
-  // 从 Supabase 加载模型列表
-  useEffect(() => {
-    const fetchData = async () => {
-      // 加载模型列表
-      const { data: modelsData, error: modelsError } = await supabase
-        .from('models')
-        .select('*')
-        .eq('is_active', true)
-        .order('display_name', { ascending: true });
-      if (!modelsError && modelsData) {
-        setModels(modelsData);
-        const savedId = localStorage.getItem('selectedModelId');
-        const modelExists = modelsData.some(m => m.id === savedId);
-        if (!modelExists && modelsData.length > 0) {
-          setSelectedModelId(modelsData[0].id);
-        }
+  // 加载模型列表
+  const fetchModels = useCallback(async () => {
+    const { data: modelsData, error: modelsError } = await supabase
+      .from('models')
+      .select('*')
+      .eq('is_active', true)
+      .order('display_name', { ascending: true });
+    if (!modelsError && modelsData) {
+      setModels(modelsData);
+      const savedId = localStorage.getItem('selectedModelId');
+      const modelExists = modelsData.some(m => m.id === savedId);
+      if (!modelExists && modelsData.length > 0) {
+        setSelectedModelId(modelsData[0].id);
       }
-    };
-    fetchData();
+    }
   }, []);
+
+  // 初始加载模型列表
+  useEffect(() => {
+    fetchModels();
+  }, [fetchModels]);
+
+  // 连接恢复时重新加载模型列表
+  useEffect(() => {
+    const unsubscribe = onConnectionRecovery(() => {
+      console.log('[App] Connection recovered, refreshing models...');
+      fetchModels();
+    });
+    return unsubscribe;
+  }, [fetchModels]);
 
   // 获取当前选中的模型信息
   const selectedModel = models.find(m => m.id === selectedModelId) || null;

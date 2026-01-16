@@ -1,114 +1,96 @@
-import { supabase, tryRefreshSession, recreateClient, markRequestSuccess, markClientUnhealthy, isClientPossiblyUnhealthy } from './supabase';
+import { supabase, ensureFreshSession, recoverConnection } from './supabase';
 
-// 带超时的 Promise 包装器
+// 超时包装器，使用 AbortController 确保可以中断
 function withTimeout(promise, timeoutMs = 30000, errorMessage = '请求超时') {
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
-        })
-    ]);
+    const controller = new AbortController();
+    let timeoutId;
+
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            controller.abort();
+            reject(new Error(errorMessage));
+        }, timeoutMs);
+    });
+
+    return {
+        promise: Promise.race([promise, timeoutPromise]).finally(() => {
+            clearTimeout(timeoutId);
+        }),
+        abort: () => controller.abort(),
+    };
 }
 
 /**
  * 带自动恢复的 Supabase 请求包装器
- * 直接执行请求，失败时尝试刷新 session 并重试
+ * 直接执行请求，失败时尝试刷新 session 或重建连接并重试
  * 
  * @param {Function} queryFn - 返回 Supabase query 的函数
  * @param {Object} options - 配置选项
- * @param {number} options.maxRetries - 最大重试次数，默认 1
- * @param {number} options.timeoutMs - 超时时间，默认 30 秒
+ * @param {number} options.maxRetries - 最大重试次数，默认 2
+ * @param {number} options.timeoutMs - 超时时间，默认 15 秒（降低以更快检测冻结）
  * @returns {Promise<{data: any, error: any}>}
  */
-export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 30000 } = {}) {
-    console.log('[Supabase Request] Starting request...');
-
-    // 在发起请求前检查客户端健康状态，如果不健康则先等待网络恢复
-    if (isClientPossiblyUnhealthy()) {
-        console.log('[Supabase Request] Client possibly unhealthy, waiting for recovery...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        // 给予一次机会标记为健康
-        markRequestSuccess();
-    }
+export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 15000 } = {}) {
+    let lastError = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            console.log(`[Supabase Request] Executing query (attempt ${attempt + 1}/${maxRetries + 1})...`);
-
-            const result = await withTimeout(queryFn(), timeoutMs, '查询超时');
+            // 使用 withTimeout 包装查询
+            const { promise } = withTimeout(queryFn(), timeoutMs, '查询超时');
+            const result = await promise;
             const { data, error } = result;
 
-            console.log('[Supabase Request] Query completed, error:', error ? error.message : 'none');
-
             if (!error) {
-                // 请求成功，标记健康状态
-                markRequestSuccess();
                 return { data, error: null };
             }
 
-            // 检查是否是认证相关的错误
+            lastError = error;
             const isAuthError = isAuthenticationError(error);
-            console.log('[Supabase Request] Is auth error:', isAuthError);
-
-            // 检查是否是 AbortError（通常发生在客户端重建时）
             const isAbortError = error.name === 'AbortError' ||
                 error.message?.includes('aborted') ||
                 error.message?.includes('The operation was aborted');
 
+            // AbortError 可能是冻结导致的
             if (isAbortError && attempt < maxRetries) {
-                console.warn('[Supabase Request] AbortError detected in result, waiting and retrying...');
-                // 等待客户端稳定
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                // 标记为健康，给新客户端一个机会
-                markRequestSuccess();
+                console.log(`[SupabaseRequest] AbortError on attempt ${attempt + 1}, triggering recovery...`);
+                await recoverConnection();
+                await new Promise(resolve => setTimeout(resolve, 500));
                 continue;
             }
 
+            // Auth 错误，刷新 session
             if (isAuthError && attempt < maxRetries) {
-                console.warn(`[Supabase Request] Auth error detected, attempting recovery...`);
-                markClientUnhealthy();
-
-                // 尝试刷新 session（非阻塞，带超时）
-                const refreshed = await tryRefreshSession(5000);
-
-                if (!refreshed) {
-                    // 刷新失败，尝试重建客户端
-                    console.warn('[Supabase Request] Refresh failed, recreating client...');
-                    recreateClient();
-                }
-
-                // 继续重试
+                console.log(`[SupabaseRequest] Auth error on attempt ${attempt + 1}, refreshing session...`);
+                await ensureFreshSession(5000);
                 continue;
             }
 
-            // 非认证错误或已达最大重试次数
             return { data, error };
 
         } catch (e) {
-            console.error('[Supabase Request] Error:', e.message);
+            lastError = e;
 
-            if (e.message === '查询超时') {
-                markClientUnhealthy();
-
-                if (attempt < maxRetries) {
-                    console.warn('[Supabase Request] Query timeout detected, waiting for recovery...');
-
-                    // 等待网络恢复
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-
-                    // 标记为健康，给下次查询一个机会
-                    // 不要重建客户端，因为这会导致 AbortError
-                    markRequestSuccess();
-                    console.log('[Supabase Request] Retrying after timeout...');
-
-                    continue;
-                }
+            // 超时错误 - 可能是 SDK 冻结
+            if (e.message === '查询超时' && attempt < maxRetries) {
+                console.log(`[SupabaseRequest] Timeout on attempt ${attempt + 1}, triggering full recovery...`);
+                // 超时很可能是 SDK 冻结，触发完整恢复流程
+                await recoverConnection();
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                continue;
             }
 
-            // 处理 AbortError (通常发生在客户端重建时或网络不稳定)
+            // AbortError
             if ((e.name === 'AbortError' || e.message?.includes('aborted')) && attempt < maxRetries) {
-                console.warn('[Supabase Request] Request aborted (likely due to client recreation), retrying in 500ms...');
+                console.log(`[SupabaseRequest] AbortError (catch) on attempt ${attempt + 1}, triggering recovery...`);
+                await recoverConnection();
                 await new Promise(resolve => setTimeout(resolve, 500));
+                continue;
+            }
+
+            // 网络错误也可能需要恢复
+            if (isNetworkError(e) && attempt < maxRetries) {
+                console.log(`[SupabaseRequest] Network error on attempt ${attempt + 1}, waiting...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
             }
 
@@ -116,20 +98,15 @@ export async function withSessionRefresh(queryFn, { maxRetries = 2, timeoutMs = 
         }
     }
 
-    console.log('[Supabase Request] Max retries exceeded');
-    return { data: null, error: new Error('Max retries exceeded') };
+    return { data: null, error: lastError || new Error('Max retries exceeded') };
 }
 
-/**
- * 检查错误是否是认证相关的错误
- */
 function isAuthenticationError(error) {
     if (!error) return false;
 
     const errorMessage = error.message?.toLowerCase() || '';
     const errorCode = error.code || '';
 
-    // 常见的认证错误模式
     const authErrorPatterns = [
         'jwt',
         'token',
@@ -137,7 +114,7 @@ function isAuthenticationError(error) {
         'unauthorized',
         'not authenticated',
         'session',
-        'pgrst301',  // PostgREST JWT 过期错误
+        'pgrst301',
         '401',
     ];
 
@@ -146,9 +123,26 @@ function isAuthenticationError(error) {
     );
 }
 
+function isNetworkError(error) {
+    if (!error) return false;
+
+    const errorMessage = error.message?.toLowerCase() || '';
+    const networkPatterns = [
+        'network',
+        'failed to fetch',
+        'load failed',
+        'connection',
+        'econnrefused',
+        'timeout',
+    ];
+
+    return networkPatterns.some(pattern => errorMessage.includes(pattern));
+}
+
 /**
  * 执行 RPC 调用，带自动刷新
  */
 export async function rpcWithRefresh(rpcName, params, options = {}) {
     return withSessionRefresh(() => supabase.rpc(rpcName, params), options);
 }
+
